@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import steam
-from .analyze import Analysis, SaveCandidate, overrides_string
+from .analyze import Analysis, SaveCandidate
 from .pe import PEError, PEFile
 
 Progress = Callable[[str, float | None], None]
@@ -25,11 +25,15 @@ class Choices:
     user: steam.SteamUser
     move_to: Path | None = None  # parent folder to move the game into
     args: str = ""  # arguments for the game itself
-    extra_env: str = ""  # e.g. "DXVK_HUD=fps PROTON_LOG=1"
+    extra_env: str = ""  # e.g. "DXVK_HUD=fps"
     collection: str = "Linux"
     saves: list[SaveCandidate] = field(default_factory=list)
     overlay: bool = True
     restart_steam: bool = True
+    mangohud: bool = False
+    gamemode: bool = False
+    proton_log: bool = False
+    artwork_key: str = ""  # SteamGridDB API key; "" = no artwork
 
 
 @dataclass
@@ -39,11 +43,18 @@ class Result:
     exe: Path
     launch_options: str
     updated: bool
-    backup: Path
+    backup: Path | None
     moved_to: Path | None = None
     saves_copied: list[str] = field(default_factory=list)
     collection_ok: bool = True
     notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Job:
+    analysis: Analysis
+    dll_overrides: str
+    choices: Choices
 
 
 def data_dir() -> Path:
@@ -72,7 +83,7 @@ def move_game(src: Path, parent: Path, progress: Progress) -> Path:
     if dest.exists() and any(dest.iterdir()):
         raise FileExistsError(f"{dest} already exists and isn't empty")
     if os.stat(src).st_dev == os.stat(parent).st_dev:
-        progress("Moving folder", None)
+        progress(f"Moving {src.name}", None)
         if dest.exists():
             dest.rmdir()
         os.replace(src, dest)
@@ -84,7 +95,7 @@ def move_game(src: Path, parent: Path, progress: Progress) -> Path:
         nonlocal done
         shutil.copy2(s, d)
         done += os.path.getsize(s)
-        progress(f"Copying {Path(s).name}", done / total if total else None)
+        progress(f"Copying {src.name}: {Path(s).name}", done / total if total else None)
 
     shutil.copytree(src, dest, symlinks=True, copy_function=copy)
     progress("Checking the copy", None)
@@ -118,10 +129,26 @@ def wrapper_bat(exe: Path, args: str) -> Path:
     return dest
 
 
-def launch_options(env: str, args: str) -> str:
-    if env and not args:
-        return f"{env} %command%"
-    return args  # no env: Steam appends plain options to the command
+def command_prefix(dll_overrides: str, c: Choices) -> str:
+    """Everything that goes before %command%: variables, then wrappers."""
+    parts = []
+    if dll_overrides:
+        parts.append(f'WINEDLLOVERRIDES="{dll_overrides}"')
+    if c.proton_log:
+        parts.append("PROTON_LOG=1")
+    if c.extra_env.strip():
+        parts.append(c.extra_env.strip())
+    if c.gamemode:
+        parts.append("gamemoderun")
+    if c.mangohud:
+        parts.append("mangohud")
+    return " ".join(parts)
+
+
+def launch_options(prefix: str, args: str) -> str:
+    if prefix and not args:
+        return f"{prefix} %command%"
+    return args  # no prefix: Steam appends plain options to the command
 
 
 def extract_icon(exe: Path, appid: int) -> str:
@@ -136,97 +163,137 @@ def extract_icon(exe: Path, appid: int) -> str:
     try:
         import gi
         gi.require_version("GdkPixbuf", "2.0")
-        from gi.repository import GdkPixbuf, GLib
+        from gi.repository import GdkPixbuf
         loader = GdkPixbuf.PixbufLoader()
         loader.write(ico)
         loader.close()
         dest = folder / f"{appid}.png"
         loader.get_pixbuf().savev(str(dest), "png", [], [])
         return str(dest)
-    except (ImportError, ValueError, Exception):  # noqa: BLE001 - any loader failure falls back
+    except Exception:  # noqa: BLE001 - any loader failure falls back to the .ico
         dest = folder / f"{appid}.ico"
         dest.write_bytes(ico)
         return str(dest)
 
 
-# ------------------------------------------------------------------------ main
+# ------------------------------------------------------------------- one game
 
-def apply(a: Analysis, dll_overrides: str, c: Choices, progress: Progress = lambda *_: None) -> Result:
-    if steam.game_running():
-        raise RuntimeError("A Steam game is running. Close it first, Steam has to restart.")
+def _add_one(job: Job, progress: Progress) -> Result:
+    a, c = job.analysis, job.choices
     exe, root = a.exe, a.root
     moved = None
+    notes: list[str] = []
 
-    # 1. Move the folder.
     if c.move_to and c.move_to.resolve() != root.parent.resolve():
         new_root = move_game(root, c.move_to, progress)
         exe = new_root / exe.relative_to(root)
         root = moved = new_root
 
-    # 2. Work out what Steam should run.
     target = exe
-    notes = []
     if a.bat_needs_copy:
         target = linux_bat(exe)
         notes.append(f"Made {target.name} (no pause/taskkill) and pointed Steam at it.")
-    env = " ".join(x for x in (f'WINEDLLOVERRIDES="{dll_overrides}"' if dll_overrides else "", c.extra_env.strip()) if x)
+    prefix = command_prefix(job.dll_overrides, c)
     args = c.args.strip()
-    if args and env and target.suffix.lower() == ".exe":
+    if args and prefix and target.suffix.lower() == ".exe":
         target = wrapper_bat(target, args)
         args = ""
         notes.append(f"Arguments go through {target.name}, since Steam can't combine them with variables.")
-    options = launch_options(env, args)
+    options = launch_options(prefix, args)
 
     shortcut = steam.Shortcut(c.name.strip(), target, target.parent, options, allow_overlay=c.overlay)
     appid = steam.shortcut_appid(shortcut.exe_field, shortcut.name)
-    progress("Extracting the icon", None)
+    progress(f"{c.name}: icon", None)
     shortcut.icon = extract_icon(exe, appid)
 
-    # 3. Steam must be closed while its files change.
+    progress(f"{c.name}: adding to Steam", None)
+    appid, updated = steam.write_shortcut(c.user, shortcut)
+    steam.set_compat_tool(appid, c.proton.internal)
+    collection_ok = True
+    if c.collection.strip():
+        collection_ok = steam.add_to_collection(c.user, c.collection.strip(), appid)
+
+    if c.artwork_key:
+        progress(f"{c.name}: artwork", None)
+        from .artwork import ArtworkError, download
+        try:
+            matched, files = download(c.name, appid, steam.grid_dir(c.user), c.artwork_key)
+            if files:
+                notes.append(f"Artwork from SteamGridDB (“{matched}”): {len(files)} image(s).")
+        except ArtworkError as error:
+            notes.append(f"No artwork: {error}.")
+
+    copied = []
+    if c.saves:
+        progress(f"{c.name}: creating the Proton prefix (the game is not started)", None)
+        user_dir = steam.create_prefix(c.proton, appid)
+        for s in c.saves:
+            progress(f"{c.name}: copying saves to {s.dest}", None)
+            dest = user_dir / s.dest
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(s.source, dest, dirs_exist_ok=True)
+            copied.append(s.dest)
+    return Result(appid, shortcut.name, target, options, updated, None, moved, copied, collection_ok, notes)
+
+
+# ------------------------------------------------------------------------ main
+
+def apply_many(jobs: list[Job], progress: Progress = lambda *_: None, keep_backups: int = 20,
+               reopen_steam: bool = True) -> list[Result | Exception]:
+    """Add several games with one Steam restart. Failures don't stop the rest."""
+    if not jobs:
+        return []
+    if steam.game_running():
+        raise RuntimeError("A Steam game is running. Close it first, Steam has to restart.")
+    user = jobs[0].choices.user
     was_running = steam.steam_running()
     if was_running:
         progress("Closing Steam", None)
         steam.close_steam()
-    stamp = time.strftime("%Y%m%d-%H%M%S")
     progress("Backing up Steam's settings", None)
-    saved = steam.backup(c.user, stamp)
+    saved = steam.backup(user, time.strftime("%Y%m%d-%H%M%S"))
+    steam.prune_backups(keep_backups)
+    results: list[Result | Exception] = []
     try:
-        progress("Adding the shortcut", None)
-        appid, updated = steam.write_shortcut(c.user, shortcut)
-        steam.set_compat_tool(appid, c.proton.internal)
-        collection_ok = True
-        if c.collection.strip():
-            collection_ok = steam.add_to_collection(c.user, c.collection.strip(), appid)
-
-        # 4. Saves go into the game's own Proton prefix.
-        copied = []
-        if c.saves:
-            progress("Creating the Proton prefix (the game is not started)", None)
-            user_dir = steam.create_prefix(c.proton, appid)
-            for s in c.saves:
-                dest = user_dir / s.dest
-                progress(f"Copying saves to {s.dest}", None)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(s.source, dest, dirs_exist_ok=True)
-                copied.append(s.dest)
+        for job in jobs:
+            try:
+                r = _add_one(job, progress)
+                r.backup = saved
+                results.append(r)
+            except Exception as error:  # noqa: BLE001 - report per game
+                results.append(error)
     finally:
-        if was_running and c.restart_steam:
+        if was_running and reopen_steam:
             progress("Reopening Steam", None)
             steam.open_steam()
+    return results
 
-    return Result(appid, shortcut.name, target, options, updated, saved, moved, copied, collection_ok, notes)
+
+def apply(a: Analysis, dll_overrides: str, c: Choices, progress: Progress = lambda *_: None,
+          keep_backups: int = 20) -> Result:
+    r = apply_many([Job(a, dll_overrides, c)], progress, keep_backups, c.restart_steam)[0]
+    if isinstance(r, Exception):
+        raise r
+    return r
 
 
 def describe(a: Analysis, dll_overrides: str, c: Choices) -> str:
     """A readable summary of what apply() would do."""
-    env = " ".join(x for x in (f'WINEDLLOVERRIDES="{dll_overrides}"' if dll_overrides else "", c.extra_env.strip()) if x)
+    prefix = command_prefix(dll_overrides, c)
+    args = c.args.strip()
     lines = [f"Name:        {c.name}", f"Runs:        {a.exe}"]
     if c.move_to and c.move_to.resolve() != a.root.parent.resolve():
         lines.append(f"Moves:       {a.root} -> {c.move_to / a.root.name}")
     lines.append(f"Proton:      {c.proton.display} ({c.proton.internal})")
-    lines.append(f"Options:     {launch_options(env, c.args.strip()) if not (env and c.args.strip()) else env + ' %command% (args via .bat)'}")
+    if prefix and args:
+        lines.append(f"Options:     {prefix} %command%   (arguments “{args}” via a -linux.bat)")
+    else:
+        lines.append(f"Options:     {launch_options(prefix, args) or '(none)'}")
+    lines.append(f"Overlay:     {'on' if c.overlay else 'off'}")
     if c.collection:
         lines.append(f"Collection:  {c.collection}")
+    if c.artwork_key:
+        lines.append("Artwork:     from SteamGridDB")
     for s in c.saves:
         lines.append(f"Saves:       {s.source} -> C:\\users\\steamuser\\{s.dest.replace('/', chr(92))}")
     return "\n".join(lines)

@@ -9,6 +9,7 @@ from pathlib import Path
 from . import __version__, steam
 from .analyze import analyze, overrides_string
 from .apply import Choices, apply, describe, parse_env
+from .config import Settings
 
 
 def _print_analysis(a) -> None:
@@ -30,7 +31,7 @@ def _print_analysis(a) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if argv and not argv[0].startswith("-") and Path(argv[0]).is_file():
+    if argv and not argv[0].startswith("-") and Path(argv[0]).exists():
         from .gui import run  # `proton-porter game.exe` opens the window with it
         return run(["proton-porter", str(Path(argv[0]).resolve())])
     p = argparse.ArgumentParser(prog="proton-porter", description="Add Windows games to Steam with Proton, fixed up.")
@@ -55,7 +56,15 @@ def main(argv: list[str] | None = None) -> int:
     add.add_argument("--search", action="append", type=Path, default=[],
                      help="extra folder to look for old saves in (a Windows backup or user folder)")
     add.add_argument("--no-restart", action="store_true", help="leave Steam closed afterwards")
+    add.add_argument("--mangohud", action="store_true")
+    add.add_argument("--gamemode", action="store_true")
+    add.add_argument("--log", action="store_true", help="PROTON_LOG=1")
+    add.add_argument("--artwork", action="store_true", help="fetch SteamGridDB artwork (key from Settings)")
     add.add_argument("--dry-run", action="store_true")
+
+    sc = sub.add_parser("scan", help="list the games in a folder's sub-folders")
+    sc.add_argument("folder", type=Path)
+    sub.add_parser("list", help="list non-Steam games in the library")
 
     sub.add_parser("protons", help="list Proton versions Steam can use")
 
@@ -63,6 +72,15 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd is None:
         from .gui import run
         return run()
+    if a.cmd == "scan":
+        from .analyze import scan_folder
+        for info, likely in scan_folder(a.folder, []):
+            print(f"[{'x' if likely else ' '}] {info.name:30} {info.engine:24} {info.exe}")
+        return 0
+    if a.cmd == "list":
+        for e in steam.library(steam.users()[0]):
+            print(f"{e.appid:<11} {e.name:30} {e.tool or '-':20} {e.exe}")
+        return 0
     if a.cmd == "protons":
         for t in steam.protons():
             print(f"{t.internal:24} {t.display:24} {t.path}")
@@ -96,7 +114,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     c = Choices(name=a.name or info.name, proton=tool, user=users[0], move_to=a.move_to,
                 args=a.args, extra_env=parse_env(a.env), collection=a.collection,
-                saves=[] if a.no_saves else info.saves, restart_steam=not a.no_restart)
+                saves=[] if a.no_saves else info.saves, restart_steam=not a.no_restart,
+                mangohud=a.mangohud, gamemode=a.gamemode, proton_log=a.log,
+                artwork_key=Settings.load().steamgriddb_key if a.artwork else "")
     print()
     print(describe(info, overrides_string(info.dlls), c))
     if a.dry_run:

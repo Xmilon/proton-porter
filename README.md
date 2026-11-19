@@ -22,6 +22,23 @@ fixes already applied. Pick the game's `.exe` and Proton Porter:
 - **tells you what else to expect**: engine, 32/64-bit, anti-cheat, .NET/XNA,
   Visual C++ redistributables, with the `protontricks` command to run if needed.
 
+It also has:
+
+- **Scan folder**: point it at a folder (an old `Program Files`, a games drive)
+  and it lists every sub-folder with a game in it, picks the right `.exe` (it
+  prefers script-extender loaders like `nvse_loader.exe`), and adds the ticked
+  ones in one go.
+- **Library**: every non-Steam game in your Steam library, with buttons to open
+  its folder or its Proton folder, run Protontricks, reset its Proton folder, or
+  remove it from Steam.
+- **Per-game switches** for MangoHud, GameMode, the Steam overlay and Proton
+  logging (`~/steam-<appid>.log`).
+- **Artwork**: covers, banners and logos from SteamGridDB (free API key, set in
+  Settings).
+- **Settings**: default games folder, Proton version, collection, launch
+  switches, extra folders to search for saves, the SteamGridDB key, and backups
+  with a Restore button.
+
 Steam rewrites its settings from memory, so Proton Porter closes Steam for a
 moment and reopens it. It backs up `shortcuts.vdf`, `config.vdf` and the
 collections file to `~/.local/state/proton-porter/backups/<date>` first.
@@ -53,10 +70,13 @@ proton-porter analyze "~/Old Windows/Programmi/Some Game/Game.exe"
 proton-porter add GAME.exe --move-to ~/Storage/Games --collection Linux
 proton-porter add GAME.exe --args=-windowed --env "DXVK_HUD=fps" --dry-run
 proton-porter protons          # Proton versions Steam can use
+proton-porter scan ~/Old\ Windows/Programmi   # what a folder scan would find
+proton-porter list             # non-Steam games in the library
 ```
 
 `add` options: `--name`, `--proton <internal name>`, `--dll NAME` / `--no-dll NAME`,
-`--search DIR` (another place to look for saves), `--no-saves`, `--no-restart`.
+`--search DIR` (another place to look for saves), `--no-saves`, `--no-restart`,
+`--mangohud`, `--gamemode`, `--log`, `--artwork`.
 
 ## Notes
 
@@ -67,6 +87,10 @@ proton-porter protons          # Proton versions Steam can use
   making a second one.
 - Games with kernel anti-cheat that hasn't been enabled for Proton won't run
   online whatever you do.
+
+## Made by
+
+[Xmilon](https://github.com/Xmilon).
 
 ## Development
 

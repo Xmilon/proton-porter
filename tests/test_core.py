@@ -11,6 +11,11 @@ from pathlib import Path
 import vdf
 
 
+def _w(path, fn):
+    with open(path, "w") as fh:
+        fn(fh)
+
+
 def tiny_pe(path: Path, dotnet: bool = False) -> None:
     """A minimal 64-bit PE with no imports or resources."""
     d = bytearray(0x400)
@@ -38,10 +43,10 @@ class Sandbox(unittest.TestCase):
         (self.steam / "config").mkdir()
         vdf.dump({"users": {str(76561197960265728 + 123): {"PersonaName": "me", "MostRecent": "1"}}},
                  open(self.steam / "config/loginusers.vdf", "w"))
-        vdf.dump({"InstallConfigStore": {"Software": {"Valve": {"Steam": {}}}}}, open(self.steam / "config/config.vdf", "w"))
-        json.dump([["user-collections.favorite", {"key": "user-collections.favorite", "timestamp": 1,
-                    "value": '{"id":"favorite","name":"Favorites","added":[],"removed":[]}', "version": "5"}]],
-                  open(cfg / "cloudstorage/cloud-storage-namespace-1.json", "w"))
+        _w(self.steam / "config/config.vdf", lambda fh: vdf.dump({"InstallConfigStore": {"Software": {"Valve": {"Steam": {}}}}}, fh))
+        _w(cfg / "cloudstorage/cloud-storage-namespace-1.json", lambda fh: json.dump(
+            [["user-collections.favorite", {"key": "user-collections.favorite", "timestamp": 1,
+              "value": '{"id":"favorite","name":"Favorites","added":[],"removed":[]}', "version": "5"}]], fh))
         os.environ["PROTON_PORTER_STEAM_ROOT"] = str(self.steam)
         os.environ["XDG_STATE_HOME"] = str(self.tmp / "state")
         os.environ["XDG_DATA_HOME"] = str(self.tmp / "data")
@@ -89,19 +94,19 @@ class Sandbox(unittest.TestCase):
         again, updated = steam.write_shortcut(user, sc)
         self.assertTrue(updated)
         self.assertEqual(again, appid)
-        data = vdf.binary_load(open(user.config / "shortcuts.vdf", "rb"))
+        data = vdf.binary_loads(Path(user.config / "shortcuts.vdf").read_bytes())
         self.assertEqual(len(data["shortcuts"]), 1)
         steam.set_compat_tool(appid, "proton_experimental")
-        cfg = vdf.load(open(self.steam / "config/config.vdf"))
+        cfg = vdf.loads(Path(self.steam / "config/config.vdf").read_text())
         self.assertEqual(cfg["InstallConfigStore"]["Software"]["Valve"]["Steam"]["CompatToolMapping"][str(appid)]["name"],
                          "proton_experimental")
         self.assertTrue(steam.add_to_collection(user, "Linux", appid))
         self.assertTrue(steam.add_to_collection(user, "linux", appid))  # same collection, no duplicate
         self.assertEqual(steam.collections(user), ["Linux"])
-        entries = dict(json.load(open(user.config / "cloudstorage/cloud-storage-namespace-1.json")))
+        entries = dict(json.loads(Path(user.config / "cloudstorage/cloud-storage-namespace-1.json").read_text()))
         body = json.loads(entries["user-collections.uc-linux"]["value"])
         self.assertEqual(body["added"], [appid])
-        self.assertEqual(json.load(open(user.config / "cloudstorage/cloud-storage-namespace-1.modified.json")),
+        self.assertEqual(json.loads(Path(user.config / "cloudstorage/cloud-storage-namespace-1.modified.json").read_text()),
                          ["user-collections.uc-linux"])
 
     def test_apply_moves_and_wraps_args(self):
@@ -116,6 +121,51 @@ class Sandbox(unittest.TestCase):
         self.assertFalse((self.tmp / "Old/My Game").exists())
         self.assertEqual(r.exe.name, "MyGame-Win64-Shipping-linux.bat")
         self.assertEqual(r.launch_options, 'WINEDLLOVERRIDES="winmm=n,b" %command%')
+
+    def test_remove_and_restore(self):
+        from proton_porter import steam
+        user = steam.users()[0]
+        sc = steam.Shortcut("My Game", self.exe, self.exe.parent)
+        appid, _ = steam.write_shortcut(user, sc)
+        steam.set_compat_tool(appid, "proton_experimental")
+        steam.add_to_collection(user, "Linux", appid)
+        saved = steam.backup(user, "before")
+        self.assertEqual([e.name for e in steam.library(user)], ["My Game"])
+        self.assertEqual(steam.library(user)[0].tool, "proton_experimental")
+        self.assertTrue(steam.remove_shortcut(user, appid))
+        self.assertEqual(steam.library(user), [])
+        entries = dict(json.loads(Path(user.config / "cloudstorage/cloud-storage-namespace-1.json").read_text()))
+        self.assertEqual(json.loads(entries["user-collections.uc-linux"]["value"])["added"], [])
+        self.assertNotIn(str(appid), steam.compat_mapping())
+        steam.restore_backup(user, saved)
+        self.assertEqual([e.name for e in steam.library(user)], ["My Game"])
+
+    def test_launch_prefix(self):
+        from proton_porter import steam
+        from proton_porter.apply import Choices, command_prefix, launch_options
+        c = Choices(name="x", proton=steam.Proton("p", "p", self.tmp), user=steam.users()[0],
+                    extra_env="DXVK_HUD=fps", mangohud=True, gamemode=True, proton_log=True)
+        prefix = command_prefix("winmm=n,b", c)
+        self.assertEqual(prefix, 'WINEDLLOVERRIDES="winmm=n,b" PROTON_LOG=1 DXVK_HUD=fps gamemoderun mangohud')
+        self.assertEqual(launch_options(prefix, ""), prefix + " %command%")
+        self.assertEqual(launch_options("", "-windowed"), "-windowed")
+
+    def test_scan(self):
+        from proton_porter.analyze import scan_folder
+        tools = self.tmp / "Old/Some Tool"
+        tools.mkdir()
+        tiny_pe(tools / "tool.exe")
+        found = {a.name: likely for a, likely in scan_folder(self.tmp / "Old", [])}
+        self.assertEqual(found, {"My Game": True, "Some Tool": False})
+
+    def test_settings_roundtrip(self):
+        os.environ["XDG_CONFIG_HOME"] = str(self.tmp / "cfg")
+        from proton_porter.config import Settings
+        s = Settings.load()
+        s.collection, s.mangohud = "Ported", True
+        s.save()
+        self.assertEqual((Settings.load().collection, Settings.load().mangohud), ("Ported", True))
+        self.assertEqual(oct((self.tmp / "cfg/proton-porter/settings.json").stat().st_mode & 0o777), "0o600")
 
     def test_valve_names(self):
         from proton_porter.steam import _valve_internal

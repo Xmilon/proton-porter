@@ -53,7 +53,8 @@ SOMETIMES_NATIVE = {
 NOT_THE_GAME = re.compile(
     r"(unitycrashhandler|crashreport|crashpad|unins\d*|uninstall|setup|vc_?redist|dxsetup|"
     r"dotnet|physx|easyanticheat|eac_?launcher|battleye|be_service|ue4prereq|uerequire|"
-    r"cefprocess|webhelper|7z|zip|python|7za|cmdmenusel|depotdownloader)",
+    r"cefprocess|webhelper|7z|zip|python|7za|cmdmenusel|depotdownloader|installer|uplay|"
+    r"redistributable|crashhandler|firewall|helper)",
     re.I,
 )
 
@@ -305,3 +306,71 @@ def analyze(exe: Path, search_roots: list[Path] | None = None) -> Analysis:
 def overrides_string(dlls: list[DllChoice]) -> str:
     on = [d.name for d in dlls if d.enabled]
     return ";".join(f"{n}=n,b" for n in on)
+
+
+# ------------------------------------------------------------- folder scanning
+
+SKIP_DIRS = re.compile(r"^(common files|microsoft.*|windows.*|internet explorer|reference assemblies|"
+                       r"msbuild|dotnet|nvidia.*|amd|intel|realtek|steam|epic games|gog galaxy|"
+                       r"ubisoft|ea games|origin|battle\.net|riot games|\$.*|\..*)$", re.I)
+
+
+def best_exe(folder: Path, max_depth: int = 4) -> Path | None:
+    """The most likely game executable under a folder."""
+    want = _norm(folder.name)
+    best: tuple[float, Path] | None = None
+    base = len(folder.parts)
+    try:
+        candidates = [p for p in folder.rglob("*") if p.suffix.lower() == ".exe" and len(p.parts) - base <= max_depth]
+    except OSError:
+        return None
+    for p in candidates:
+        if NOT_THE_GAME.search(p.stem) or not p.is_file():
+            continue
+        try:
+            size = p.stat().st_size
+        except OSError:
+            continue
+        stem = _norm(p.stem)
+        score = min(size / 2**20, 200)  # MB, capped
+        if stem and (stem == want or (len(stem) >= 4 and (stem in want or want in stem))):
+            score += 300
+        if "shipping" in stem:
+            score += 150
+        if re.fullmatch(r"(nv|f4|sk|ob|fo)se_?loader", stem):
+            score += 400  # script extender: starts the game with mods
+        elif "launcher" in stem or "loader" in stem:
+            score -= 50
+        if (p.parent / "UnityPlayer.dll").exists() or p.with_name(p.stem + "_Data").is_dir():
+            score += 200
+        score -= 5 * (len(p.parts) - base)
+        if best is None or score > best[0]:
+            best = (score, p)
+    return best[1] if best else None
+
+
+def scan_folder(folder: Path, search_roots: list[Path] | None = None) -> list[tuple[Analysis, bool]]:
+    """Each sub-folder that holds a Windows program, with a guess whether it is a game."""
+    out = []
+    try:
+        children = sorted((c for c in Path(folder).iterdir() if c.is_dir() and not SKIP_DIRS.match(c.name)),
+                          key=lambda c: c.name.lower())
+    except OSError:
+        return out
+    for child in children:
+        exe = best_exe(child)
+        if exe is None:
+            continue
+        try:
+            a = analyze(exe, search_roots)
+        except (OSError, ValueError):
+            continue
+        here = {p.name.lower() for p in exe.parent.iterdir()}
+        a.root = child
+        if not a.unity_ids:
+            a.name = tidy_name(child.name)
+        likely = (a.engine not in ("Unknown", ".NET", "NW.js / Electron") or any(d.enabled for d in a.dlls)
+                  or bool({"steam_api.dll", "steam_api64.dll", "galaxy.dll", "galaxy64.dll"} & here)
+                  or any(n.endswith((".pak", ".forge", ".bsa", ".ba2", ".pck", ".assets")) for n in here))
+        out.append((a, likely))
+    return out

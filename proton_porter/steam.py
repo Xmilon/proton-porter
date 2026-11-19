@@ -33,6 +33,21 @@ def steam_root() -> Path:
     raise FileNotFoundError("Steam isn't installed (no ~/.local/share/Steam)")
 
 
+def _vload(path):
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return vdf.load(fh)
+
+
+def _bload(path):
+    with open(path, "rb") as fh:
+        return vdf.binary_load(fh)
+
+
+def _jload(path):
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 def _lower_keys(d):
     return {str(k).lower(): v for k, v in d.items()} if isinstance(d, dict) else {}
 
@@ -54,7 +69,7 @@ def users() -> list[SteamUser]:
     root = steam_root()
     out = []
     try:
-        data = vdf.load(open(root / "config/loginusers.vdf", encoding="utf-8", errors="replace"))
+        data = _vload(root / "config/loginusers.vdf")
         for sid, info in _lower_keys(data).get("users", {}).items():
             info = _lower_keys(info)
             acc = str(int(sid) - STEAMID64_BASE)
@@ -77,7 +92,7 @@ def libraries() -> list[Path]:
     root = steam_root()
     out = [root]
     try:
-        data = vdf.load(open(root / "config/libraryfolders.vdf", encoding="utf-8", errors="replace"))
+        data = _vload(root / "config/libraryfolders.vdf")
         for v in _lower_keys(data).get("libraryfolders", {}).values():
             if isinstance(v, dict) and v.get("path"):
                 p = Path(v["path"])
@@ -120,7 +135,7 @@ def protons() -> list[Proton]:
             continue
         for manifest in sorted(base.glob("*/compatibilitytool.vdf")) + sorted(base.glob("*.vdf")):
             try:
-                data = vdf.load(open(manifest, encoding="utf-8", errors="replace"))
+                data = _vload(manifest)
                 tools = _lower_keys(_lower_keys(data).get("compatibilitytools", {})).get("compat_tools", {})
                 for internal, info in tools.items():
                     info = _lower_keys(info)
@@ -222,7 +237,7 @@ class Shortcut:
 
 
 def backup(user: SteamUser, stamp: str) -> Path:
-    dest = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "proton-porter/backups" / stamp
+    dest = _backups_root() / stamp
     dest.mkdir(parents=True, exist_ok=True)
     for src in (user.config / "shortcuts.vdf", steam_root() / "config/config.vdf",
                 user.config / "cloudstorage/cloud-storage-namespace-1.json",
@@ -235,7 +250,7 @@ def backup(user: SteamUser, stamp: str) -> Path:
 def write_shortcut(user: SteamUser, sc: Shortcut) -> tuple[int, bool]:
     """Add or update the shortcut. Returns (appid, updated_existing)."""
     path = user.config / "shortcuts.vdf"
-    data = vdf.binary_load(open(path, "rb")) if path.exists() else {"shortcuts": {}}
+    data = _bload(path) if path.exists() else {"shortcuts": {}}
     entries = data.setdefault("shortcuts", {})
     appid = shortcut_appid(sc.exe_field, sc.name)
     existing = None
@@ -272,7 +287,7 @@ def write_shortcut(user: SteamUser, sc: Shortcut) -> tuple[int, bool]:
 
 def set_compat_tool(appid: int, tool: str) -> None:
     path = steam_root() / "config/config.vdf"
-    data = vdf.load(open(path, encoding="utf-8", errors="replace"))
+    data = _vload(path)
     node = data
     for key in ("InstallConfigStore", "Software", "Valve", "Steam"):
         match = next((k for k in node if k.lower() == key.lower()), key)
@@ -294,10 +309,10 @@ def add_to_collection(user: SteamUser, collection: str, appid: int) -> bool:
     store = folder / "cloud-storage-namespace-1.json"
     if not store.exists():
         return False
-    entries = json.load(open(store, encoding="utf-8"))
+    entries = _jload(store)
     versions = [int(v.get("version", 0)) for _, v in entries if isinstance(v, dict) and str(v.get("version", "0")).isdigit()]
     try:
-        ns = json.load(open(folder / "cloud-storage-namespaces.json"))
+        ns = _jload(folder / "cloud-storage-namespaces.json")
         versions += [int(v) for k, v in ns if int(k) == 1]
     except (OSError, ValueError):
         pass
@@ -332,7 +347,7 @@ def add_to_collection(user: SteamUser, collection: str, appid: int) -> bool:
         json.dump(entries, fh, separators=(",", ":"))
     modified = folder / "cloud-storage-namespace-1.modified.json"
     try:
-        mod = json.load(open(modified))
+        mod = _jload(modified)
     except (OSError, ValueError):
         mod = []
     if key not in mod:
@@ -346,7 +361,7 @@ def collections(user: SteamUser) -> list[str]:
     store = user.config / "cloudstorage/cloud-storage-namespace-1.json"
     out = []
     try:
-        for key, value in json.load(open(store, encoding="utf-8")):
+        for key, value in _jload(store):
             if key.startswith("user-collections.uc-") and not value.get("is_deleted"):
                 name = json.loads(value.get("value", "{}")).get("name")
                 if name:
@@ -375,3 +390,141 @@ def create_prefix(proton: Proton, appid: int, timeout: int = 300) -> Path:
     if not user_dir.is_dir():
         raise RuntimeError("Proton didn't create the prefix")
     return user_dir
+
+
+# --------------------------------------------------------------- management
+
+@dataclass
+class LibraryEntry:
+    appid: int
+    name: str
+    exe: Path
+    start_dir: Path
+    launch_options: str
+    tool: str
+    icon: str = ""
+
+
+def _backups_root() -> Path:
+    return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "proton-porter/backups"
+
+
+def compat_mapping() -> dict:
+    try:
+        data = _vload(steam_root() / "config/config.vdf")
+    except (OSError, SyntaxError):
+        return {}
+    node = data
+    for key in ("InstallConfigStore", "Software", "Valve", "Steam", "CompatToolMapping"):
+        node = next((v for k, v in node.items() if k.lower() == key.lower()), {}) if isinstance(node, dict) else {}
+    return node if isinstance(node, dict) else {}
+
+
+def library(user: SteamUser) -> list[LibraryEntry]:
+    """Every non-Steam game in this account's library."""
+    path = user.config / "shortcuts.vdf"
+    if not path.exists():
+        return []
+    mapping = compat_mapping()
+    out = []
+    for e in _bload(path).get("shortcuts", {}).values():
+        get = lambda k: e.get(k, e.get(k.lower(), ""))  # noqa: E731
+        appid = int(get("appid") or 0) & 0xFFFFFFFF
+        tool = mapping.get(str(appid), {}).get("name", "") if isinstance(mapping.get(str(appid)), dict) else ""
+        out.append(LibraryEntry(appid, get("AppName"), Path(str(get("Exe")).strip('"')),
+                                Path(str(get("StartDir")).strip('"')), get("LaunchOptions"), tool,
+                                str(get("icon")).strip('"')))
+    out.sort(key=lambda x: x.name.lower())
+    return out
+
+
+def remove_shortcut(user: SteamUser, appid: int) -> bool:
+    path = user.config / "shortcuts.vdf"
+    data = _bload(path)
+    old = data.get("shortcuts", {})
+    keep = [e for e in old.values() if (int(e.get("appid", 0)) & 0xFFFFFFFF) != appid]
+    if len(keep) == len(old):
+        return False
+    data["shortcuts"] = {str(i): e for i, e in enumerate(keep)}
+    with open(path, "wb") as fh:
+        vdf.binary_dump(data, fh)
+    # Forget its Proton choice and drop it from collections.
+    cfg_path = steam_root() / "config/config.vdf"
+    cfg = _vload(cfg_path)
+    node = cfg
+    for key in ("InstallConfigStore", "Software", "Valve", "Steam", "CompatToolMapping"):
+        node = next((v for k, v in node.items() if k.lower() == key.lower()), None)
+        if not isinstance(node, dict):
+            break
+    else:
+        node.pop(str(appid), None)
+        with open(cfg_path, "w", encoding="utf-8") as fh:
+            vdf.dump(cfg, fh, pretty=True)
+    remove_from_collections(user, appid)
+    for f in grid_dir(user).glob(f"{appid}*"):
+        f.unlink()
+    return True
+
+
+def remove_from_collections(user: SteamUser, appid: int) -> None:
+    folder = user.config / "cloudstorage"
+    store = folder / "cloud-storage-namespace-1.json"
+    if not store.exists():
+        return
+    entries = _jload(store)
+    versions = [int(v.get("version", 0)) for _, v in entries if str(v.get("version", "0")).isdigit()]
+    changed = []
+    for key, value in entries:
+        if not key.startswith("user-collections."):
+            continue
+        try:
+            body = json.loads(value.get("value", "{}"))
+        except ValueError:
+            continue
+        if appid in body.get("added", []):
+            body["added"] = [x for x in body["added"] if x != appid]
+            value.update(timestamp=int(time.time()), value=json.dumps(body, separators=(",", ":")),
+                         version=str(max(versions, default=0) + 1 + len(changed)))
+            changed.append(key)
+    if not changed:
+        return
+    with open(store, "w", encoding="utf-8") as fh:
+        json.dump(entries, fh, separators=(",", ":"))
+    modified = folder / "cloud-storage-namespace-1.modified.json"
+    try:
+        mod = _jload(modified)
+    except (OSError, ValueError):
+        mod = []
+    with open(modified, "w") as fh:
+        json.dump(mod + [k for k in changed if k not in mod], fh)
+
+
+def grid_dir(user: SteamUser) -> Path:
+    return user.config / "grid"
+
+
+def backups() -> list[Path]:
+    root = _backups_root()
+    return sorted((p for p in root.iterdir() if p.is_dir()), reverse=True) if root.is_dir() else []
+
+
+def prune_backups(keep: int) -> None:
+    for old in backups()[max(keep, 1):]:
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def restore_backup(user: SteamUser, folder: Path) -> list[str]:
+    """Put a backup's files back (Steam must be closed)."""
+    targets = {
+        "shortcuts.vdf": user.config / "shortcuts.vdf",
+        "config.vdf": steam_root() / "config/config.vdf",
+        "cloud-storage-namespace-1.json": user.config / "cloudstorage/cloud-storage-namespace-1.json",
+        "cloud-storage-namespace-1.modified.json": user.config / "cloudstorage/cloud-storage-namespace-1.modified.json",
+    }
+    done = []
+    for name, dest in targets.items():
+        src = folder / name
+        if src.exists():
+            shutil.copy2(src, dest)
+            done.append(name)
+    return done
