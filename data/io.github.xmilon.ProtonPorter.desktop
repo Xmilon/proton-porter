@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Proton Porter
+Comment=Add Windows games to Steam with Proton, fixed up
+Exec=proton-porter %f
+Icon=io.github.xmilon.ProtonPorter
+Terminal=false
+Categories=Game;Utility;
+MimeType=application/x-ms-dos-executable;application/x-msdownload;application/x-bat;
+Keywords=steam;proton;wine;windows;game;shortcut;
