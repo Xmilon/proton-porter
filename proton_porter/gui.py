@@ -17,7 +17,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from . import __version__, archive, protontools, repack, retry, runner, steam, uninstall, update  # noqa: E402
+from . import __version__, archive, protontools, repack, retry, runner, runners, steam, uninstall, update  # noqa: E402
 from .analyze import (Analysis, DllChoice, SaveCandidate, analyze, default_search_roots,  # noqa: E402
                       overrides_string, scan_folder)
 from .apply import Choices, Job, apply_many, data_dir, describe, parse_env  # noqa: E402
@@ -92,6 +92,7 @@ class Window(Adw.ApplicationWindow):
         self.settings = Settings.load()
         self.analysis: Analysis | None = None
         self.protons = steam.protons()
+        self.runners = runners.all_runners()  # Protons + System Wine + Native Linux
         try:
             self.users = steam.users()
         except FileNotFoundError:
@@ -159,11 +160,13 @@ class Window(Adw.ApplicationWindow):
         return default_search_roots() + [Path(p) for p in self.settings.search_folders if Path(p).is_dir()]
 
     def default_proton_index(self) -> int:
-        for i, t in enumerate(self.protons):
-            if t.internal == self.settings.proton:
+        """Index into self.runners: Native for Linux programs, else the configured or best Proton."""
+        want = runners.NATIVE if self.analysis is not None and self.analysis.native else self.settings.proton
+        for i, t in enumerate(self.runners):
+            if t.internal == want:
                 return i
         best = steam.default_proton(self.protons)
-        return self.protons.index(best) if best else 0
+        return self.runners.index(best) if best in self.runners else 0
 
     def error(self, heading: str, body: str) -> None:
         alert = Adw.AlertDialog(heading=heading, body=body)
@@ -250,7 +253,8 @@ class Window(Adw.ApplicationWindow):
 
     def install_repack(self, rp: "repack.Repack") -> None:
         games = Path(self.settings.games_dir).expanduser()
-        tool = next((t for t in self.protons if t.internal == self.settings.proton), None) \
+        tool = (runners.pseudo(runners.WINE) if self.settings.repack_use_wine else None) \
+            or next((t for t in self.protons if t.internal == self.settings.proton), None) \
             or steam.default_proton(self.protons)
         if tool is None:
             self.error("No Proton found", "Install Proton from Steam first.")
@@ -388,8 +392,8 @@ class Window(Adw.ApplicationWindow):
         page.add(loc)
 
         p = Adw.PreferencesGroup(title="Running it")
-        self.proton_row = Adw.ComboRow(title="Proton version")
-        self.proton_row.set_model(Gtk.StringList.new([t.display for t in self.protons] or ["(none installed)"]))
+        self.proton_row = Adw.ComboRow(title="Runs with", subtitle="A Proton version, the system's Wine, or none")
+        self.proton_row.set_model(Gtk.StringList.new([t.display for t in self.runners] or ["(none installed)"]))
         self.proton_row.set_selected(self.default_proton_index())
         p.add(self.proton_row)
         self.args_row = Adw.EntryRow(title="Game arguments (optional)")
@@ -523,12 +527,12 @@ class Window(Adw.ApplicationWindow):
         name = self.name_row.get_text().strip()
         if not name:
             raise ValueError("The game needs a name.")
-        if not self.protons or not self.user:
+        if not self.runners or not self.user:
             raise ValueError("Steam or Proton isn't set up.")
         s = self.settings
         c = Choices(
             name=name,
-            proton=self.protons[self.proton_row.get_selected()],
+            proton=self.runners[self.proton_row.get_selected()],
             user=self.user,
             move_to=Path(s.games_dir) if self.move_row.get_active() else None,
             args=self.args_row.get_text(),
@@ -655,10 +659,11 @@ class Window(Adw.ApplicationWindow):
             self.error("Not ready", "Steam or Proton isn't set up.")
             return
         s = self.settings
-        proton = self.protons[self.default_proton_index()]
+        chosen = next((t for t in self.runners if t.internal == s.proton), None) or steam.default_proton(self.protons)
         jobs = []
         for a in games:
             inside = str(a.root.resolve()).startswith(str(Path(s.games_dir).resolve()) + "/")
+            proton = runners.pseudo(runners.NATIVE) if a.native else chosen
             c = Choices(name=a.name, proton=proton, user=self.user,
                         move_to=Path(s.games_dir) if s.move_by_default and not inside else None,
                         extra_env=s.extra_env, collection=s.collection,
@@ -683,7 +688,7 @@ class Window(Adw.ApplicationWindow):
         refresh.add_css_class("flat")
         refresh.connect("clicked", lambda *_: self.refresh_library())
         group.set_header_suffix(refresh)
-        names = {t.internal: t.display for t in self.protons}
+        names = {t.internal: t.display for t in self.runners}
         for e in entries:
             row = Adw.ExpanderRow(title=esc(e.name),
                                   subtitle=esc(names.get(e.tool, e.tool) or "No Proton set (runs natively)"))
@@ -696,6 +701,16 @@ class Window(Adw.ApplicationWindow):
             play.connect("clicked", lambda _b, e=e: self.play_game(e))
             row.add_suffix(play)
             row.add_row(Adw.ActionRow(title="Program", subtitle=esc(e.exe), subtitle_selectable=True))
+            choices = [t for t in self.runners if t.internal != runners.NATIVE or e.tool == runners.NATIVE
+                       or runners.is_native(e.exe)]
+            runs = Adw.ComboRow(title="Runs with", model=Gtk.StringList.new([t.display for t in choices]))
+            current = next((i for i, t in enumerate(choices) if t.internal == e.tool), None)
+            if current is not None:
+                runs.set_selected(current)
+            runs.connect("notify::selected",
+                         lambda r, _p, e=e, choices=choices, current=current:
+                         r.get_selected() != current and self.change_runner(e, choices[r.get_selected()]))
+            row.add_row(runs)
             if e.launch_options:
                 row.add_row(Adw.ActionRow(title="Launch options", subtitle=esc(e.launch_options),
                                           subtitle_selectable=True))
@@ -762,7 +777,7 @@ class Window(Adw.ApplicationWindow):
     def play_game(self, e: steam.LibraryEntry) -> None:
         """Run the game with a Proton log; if it crashes the log is kept and shown."""
         try:
-            spec = runner.spec_for(e, self.protons)
+            spec = runner.spec_for(e, self.runners)
         except RuntimeError as err:
             self.error("Can't start", str(err))
             return
@@ -841,7 +856,7 @@ class Window(Adw.ApplicationWindow):
                 body = "\n".join(res.diagnosis.summary()) + (f"\n\nLog: {res.log}" if res.log else "")
                 self.error(("Still running: " if res.survived else "Stopped: ") + res.line(), body)
             self.run_task(f"Testing {e.name}",
-                          lambda progress: runner.run_test(runner.spec_for(e, self.protons), ws, secs, progress), done)
+                          lambda progress: runner.run_test(runner.spec_for(e, self.runners), ws, secs, progress), done)
         self.confirm(f"Test {e.name}?", f"Starts the game on workspace {ws} with a Proton log, waits {secs} seconds, "
                      "stops it and reads the log.", "Start", go)
 
@@ -883,6 +898,17 @@ class Window(Adw.ApplicationWindow):
                      "Deletes its Windows folder (settings, protontricks installs, and any saves kept there). "
                      "Proton makes a fresh one on the next start. The game itself isn't touched.",
                      "Reset", go, destructive=True)
+
+    def change_runner(self, e: steam.LibraryEntry, tool: steam.Proton) -> None:
+        from .apply import switch_runner
+        self.confirm(f"Run {e.name} with {tool.display}?",
+                     "Steam closes for a moment to save the change." + (
+                         " Plain Wine uses its own Windows folder, separate from Proton's (saves there don't carry over)."
+                         if tool.internal == runners.WINE else ""),
+                     "Change", lambda: self.run_steam_task(f"Switching {e.name} to {tool.display}",
+                                                          lambda: switch_runner(self.user, e, tool),
+                                                          f"{e.name} now runs with {tool.display}"))
+        self.refresh_library()  # the picker shows the saved choice until the change is done
 
     def uninstall_game(self, e: steam.LibraryEntry) -> None:
         """Run the game's uninstaller or move its folder to the Trash, then remove it from Steam."""
@@ -1081,9 +1107,10 @@ class SettingsDialog(Adw.PreferencesDialog):
         self.move = Adw.SwitchRow(title="Move games into it", subtitle="Copies, checks, then deletes the original",
                                   active=s.move_by_default)
         g.add(self.move)
-        self.proton = Adw.ComboRow(title="Proton version")
-        self.internals = [""] + [t.internal for t in win.protons]
-        self.proton.set_model(Gtk.StringList.new(["Best available (GE if installed)"] + [t.display for t in win.protons]))
+        self.proton = Adw.ComboRow(title="Runs with", subtitle="For new games; Linux programs always run natively")
+        picks = [t for t in win.runners if t.internal != runners.NATIVE]
+        self.internals = [""] + [t.internal for t in picks]
+        self.proton.set_model(Gtk.StringList.new(["Best available (GE if installed)"] + [t.display for t in picks]))
         self.proton.set_selected(self.internals.index(s.proton) if s.proton in self.internals else 0)
         g.add(self.proton)
         self.collection = Adw.EntryRow(title="Collection", text=s.collection)
@@ -1120,6 +1147,11 @@ class SettingsDialog(Adw.PreferencesDialog):
                                         subtitle="Compares the .bin files with the repack's MD5 list",
                                         active=s.repack_check_md5)
         rg2.add(self.repack_md5)
+        self.repack_wine = Adw.SwitchRow(title="Run installers with the system's Wine",
+                                         subtitle="Try this if an installer fails under Proton" if runners.wine_binary()
+                                         else "Wine isn't installed", active=s.repack_use_wine,
+                                         sensitive=bool(runners.wine_binary()))
+        rg2.add(self.repack_wine)
         rrow = Adw.ActionRow(title="Install a repack", subtitle="Choose the folder with setup.exe")
         rbtn = Gtk.Button(label="Choose folder…", valign=Gtk.Align.CENTER)
         rbtn.connect("clicked", lambda *_: (self.close(), win.on_choose_repack()))
@@ -1278,6 +1310,7 @@ class SettingsDialog(Adw.PreferencesDialog):
         s.reopen_steam = self.reopen.get_active()
         s.check_updates = self.upd.get_active()
         s.repack_check_md5 = self.repack_md5.get_active()
+        s.repack_use_wine = self.repack_wine.get_active()
         s.overlay = self.overlay.get_active()
         s.mangohud = self.mango.get_active()
         s.gamemode = self.gamemode.get_active()

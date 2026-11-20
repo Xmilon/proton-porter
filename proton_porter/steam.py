@@ -431,11 +431,32 @@ def library(user: SteamUser) -> list[LibraryEntry]:
         get = lambda k: e.get(k, e.get(k.lower(), ""))  # noqa: E731
         appid = int(get("appid") or 0) & 0xFFFFFFFF
         tool = mapping.get(str(appid), {}).get("name", "") if isinstance(mapping.get(str(appid)), dict) else ""
-        out.append(LibraryEntry(appid, get("AppName"), Path(str(get("Exe")).strip('"')),
-                                Path(str(get("StartDir")).strip('"')), get("LaunchOptions"), tool,
+        exe = Path(str(get("Exe")).strip('"'))
+        start = Path(str(get("StartDir")).strip('"'))
+        from . import runners  # local: runners imports this module
+        real = runners.read_wrapper(exe)
+        if real is not None:  # our System Wine wrapper: show the real game
+            exe, start, tool = real, real.parent, runners.WINE
+        elif not tool and runners.is_native(exe):
+            tool = runners.NATIVE
+        out.append(LibraryEntry(appid, get("AppName"), exe, start, get("LaunchOptions"), tool,
                                 str(get("icon")).strip('"')))
     out.sort(key=lambda x: x.name.lower())
     return out
+
+
+def clear_compat_tool(appid: int) -> None:
+    """Forget the game's Proton choice (it then runs as a Linux program)."""
+    cfg_path = steam_root() / "config/config.vdf"
+    cfg = _vload(cfg_path)
+    node = cfg
+    for key in ("InstallConfigStore", "Software", "Valve", "Steam", "CompatToolMapping"):
+        node = next((v for k, v in node.items() if k.lower() == key.lower()), None)
+        if not isinstance(node, dict):
+            return
+    if node.pop(str(appid), None) is not None:
+        with open(cfg_path, "w", encoding="utf-8") as fh:
+            vdf.dump(cfg, fh, pretty=True)
 
 
 def remove_shortcut(user: SteamUser, appid: int) -> bool:
@@ -448,18 +469,7 @@ def remove_shortcut(user: SteamUser, appid: int) -> bool:
     data["shortcuts"] = {str(i): e for i, e in enumerate(keep)}
     with open(path, "wb") as fh:
         vdf.binary_dump(data, fh)
-    # Forget its Proton choice and drop it from collections.
-    cfg_path = steam_root() / "config/config.vdf"
-    cfg = _vload(cfg_path)
-    node = cfg
-    for key in ("InstallConfigStore", "Software", "Valve", "Steam", "CompatToolMapping"):
-        node = next((v for k, v in node.items() if k.lower() == key.lower()), None)
-        if not isinstance(node, dict):
-            break
-    else:
-        node.pop(str(appid), None)
-        with open(cfg_path, "w", encoding="utf-8") as fh:
-            vdf.dump(cfg, fh, pretty=True)
+    clear_compat_tool(appid)  # forget its Proton choice
     remove_from_collections(user, appid)
     for f in grid_dir(user).glob(f"{appid}*"):
         f.unlink()

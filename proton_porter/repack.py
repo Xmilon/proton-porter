@@ -117,7 +117,11 @@ def windows_path(path: Path) -> str:
 
 
 def install_command(r: Repack, dest: Path, proton: steam.Proton) -> tuple[list[str], dict[str, str]]:
-    """Proton runs the installer; /DIR presets the install folder (Inno Setup, which both use)."""
+    """Proton (or the system's Wine) runs the installer; /DIR presets the install folder (Inno Setup)."""
+    from . import runners
+    if proton.internal == runners.WINE:
+        env = dict(os.environ, WINEPREFIX=str(installer_prefix() / "wine"))
+        return ["wine", str(r.setup), f"/DIR={windows_path(dest)}"], env
     env = dict(os.environ,
                STEAM_COMPAT_DATA_PATH=str(installer_prefix()),
                STEAM_COMPAT_CLIENT_INSTALL_PATH=str(steam.steam_root()),

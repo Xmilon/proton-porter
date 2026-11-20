@@ -90,9 +90,12 @@ def make_plan(entry: steam.LibraryEntry, games_dir: Path, library: list[steam.Li
     except OSError:
         pass
     others = [e.exe for e in library if e.appid != entry.appid]
+    from . import runners
+    prefix = runners.wine_prefix(entry.exe) if entry.tool == runners.WINE else \
+        None if entry.tool == runners.NATIVE else steam.prefix_dir(entry.appid)
     plan = Plan(entry.appid, entry.name, folder if folder.is_dir() else None,
                 find_uninstaller(folder) if folder.is_dir() else None,
-                steam.prefix_dir(entry.appid) if steam.prefix_dir(entry.appid).is_dir() else None)
+                prefix if prefix and prefix.is_dir() else None)
     if plan.folder:
         reason = why_unsafe(plan.folder, games_dir, others)
         if reason:

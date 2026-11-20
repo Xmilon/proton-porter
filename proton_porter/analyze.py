@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -92,6 +93,7 @@ class Analysis:
     bat_needs_copy: bool = False
     other_exes: list[Path] = field(default_factory=list)
     mods: list = field(default_factory=list)  # knowledge.KnownMod
+    native: bool = False  # a Linux program: added without Proton
 
 
 def game_root(exe: Path) -> Path:
@@ -279,6 +281,17 @@ def analyze(exe: Path, search_roots: list[Path] | None = None) -> Analysis:
         raise FileNotFoundError(exe)
     root = game_root(exe) if exe.suffix.lower() == ".exe" else exe.parent
     a = Analysis(exe=exe, root=root, name=tidy_name(root.name))
+
+    from . import runners
+    if runners.is_native(exe):
+        a.native = True
+        a.root = exe.parent
+        a.name = tidy_name(exe.parent.name) or tidy_name(exe.stem)
+        a.engine = "Native Linux"
+        a.notes.append("Linux program: it is added to Steam without Proton.")
+        if not os.access(exe, os.X_OK):
+            a.warnings.append(f"{exe.name} isn't executable. Run: chmod +x \"{exe}\"")
+        return a
 
     if exe.suffix.lower() in (".bat", ".cmd"):
         a.engine = "Batch launcher"

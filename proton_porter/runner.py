@@ -91,6 +91,18 @@ def build_command(spec: RunSpec, log_dir: Path, token: str) -> tuple[list[str], 
     })
     env.update(spec.extra_env)
     cmd = [w for w in wrappers if shutil.which(w)]
+    from . import runners
+    if runners.is_pseudo(spec.proton):
+        # No Proton: plain Wine (own prefix) or the Linux program itself. Its stderr is the log.
+        for k in ("STEAM_COMPAT_DATA_PATH", "PROTON_LOG", "PROTON_LOG_DIR"):
+            env.pop(k, None)
+        game = [str(spec.exe), *args]
+        if spec.proton.internal == runners.WINE:
+            env["WINEPREFIX"] = str(spec.prefix or runners.wine_prefix(spec.exe))
+            env.setdefault("WINEDEBUG", "+loaddll,+seh")
+            game = ["wine", *game]
+        log = log_dir / f"steam-{spec.appid}.log"
+        return ["sh", "-c", f'exec "$@" 2>>"{log}"', "sh", *cmd, *game], env
     cmd += [str(spec.proton.path / "proton"), "run", str(spec.exe), *args]
     return cmd, env
 
@@ -144,13 +156,15 @@ def _launch(cmd: list[str], env: dict[str, str], cwd: Path, workspace: int | Non
                          stderr=subprocess.DEVNULL, start_new_session=True)
 
 
-def herd_windows(appid: int, workspace: int) -> None:
-    """Move this game's windows (Steam/Proton class steam_app_<appid>) onto the workspace."""
+def herd_windows(appid: int, workspace: int, exe_name: str = "") -> None:
+    """Move this game's windows onto the workspace: class steam_app_<appid> under Proton,
+    the .exe's name (e.g. "game.exe") under plain Wine."""
     try:
         import json
         out = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=5).stdout
         for c in json.loads(out or "[]"):
-            if c.get("class") == f"steam_app_{appid}" and c.get("workspace", {}).get("id") != workspace:
+            mine = c.get("class") == f"steam_app_{appid}" or (exe_name and c.get("class", "").lower() == exe_name)
+            if mine and c.get("workspace", {}).get("id") != workspace:
                 subprocess.run(["hypruse", "hypr", "move_window", c["address"], str(workspace)],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -171,8 +185,15 @@ def run_test(spec: RunSpec, workspace: int | None, seconds: float = 60, progress
     token = uuid.uuid4().hex
     log_dir = state_dir() / "logs" / f"{spec.appid}-{stamp}-{spec.proton.internal}"
     log_dir.mkdir(parents=True, exist_ok=True)
-    spec_prefix = spec.prefix or steam.prefix_dir(spec.appid)
-    spec_prefix.mkdir(parents=True, exist_ok=True)
+    from . import runners
+    if spec.proton.internal == runners.WINE:
+        spec_prefix = spec.prefix or runners.wine_prefix(spec.exe)
+    elif spec.proton.internal == runners.NATIVE:
+        spec_prefix = None
+    else:
+        spec_prefix = spec.prefix or steam.prefix_dir(spec.appid)
+    if spec_prefix:
+        spec_prefix.mkdir(parents=True, exist_ok=True)
     cmd, env = build_command(spec, log_dir, token)
     pidfile, rcfile = log_dir / "pid", log_dir / "exit-code"
     cwd = spec.start_dir if spec.start_dir.is_dir() else spec.exe.parent
@@ -190,7 +211,7 @@ def run_test(spec: RunSpec, workspace: int | None, seconds: float = 60, progress
                 break
             progress(f"Running with {spec.proton.display}", min((time.time() - t0) / seconds, 1.0))
             if workspace is not None:
-                herd_windows(spec.appid, workspace)
+                herd_windows(spec.appid, workspace, spec.exe.name.lower())
             time.sleep(poll)
     finally:
         _kill_token(token)
@@ -203,7 +224,8 @@ def run_test(spec: RunSpec, workspace: int | None, seconds: float = 60, progress
 
 
 def spec_for(entry: steam.LibraryEntry, tools: list[steam.Proton]) -> RunSpec:
-    tool = next((t for t in tools if t.internal == entry.tool), None)
+    from . import runners
+    tool = next((t for t in tools if t.internal == entry.tool), None) or runners.pseudo(entry.tool)
     if tool is None:
         tool = steam.default_proton(tools)
     if tool is None:
@@ -287,8 +309,10 @@ def play(spec: RunSpec, poll: float = 1.0, keep_logs: int = 20) -> RunResult:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     log_dir = state_dir() / "logs" / f"{spec.appid}-{stamp}-play"
     log_dir.mkdir(parents=True, exist_ok=True)
-    prefix = spec.prefix or steam.prefix_dir(spec.appid)
-    prefix.mkdir(parents=True, exist_ok=True)
+    from . import runners
+    prefix = None if runners.is_pseudo(spec.proton) else (spec.prefix or steam.prefix_dir(spec.appid))
+    if prefix:
+        prefix.mkdir(parents=True, exist_ok=True)
     cmd, env = build_command(spec, log_dir, uuid.uuid4().hex)
     pidfile, rcfile = log_dir / "pid", log_dir / "exit-code"
     cwd = spec.start_dir if spec.start_dir.is_dir() else spec.exe.parent

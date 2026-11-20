@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     add.add_argument("exe", type=Path)
     add.add_argument("--name")
     add.add_argument("--move-to", type=Path, help="move the game's folder into this folder first")
-    add.add_argument("--proton", help="internal name, e.g. Proton-GE or proton_experimental")
+    add.add_argument("--proton", help="internal name, e.g. Proton-GE, proton_experimental, system-wine or native")
     add.add_argument("--args", default="", help="arguments for the game")
     add.add_argument("--env", default="", help='extra variables, e.g. "DXVK_HUD=fps"')
     add.add_argument("--collection", default="Linux")
@@ -106,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--no-check", action="store_true", help="skip the MD5 check")
     rp.add_argument("--add", action="store_true", help="then add it to Steam")
 
+    sr = sub.add_parser("set-runner", help="switch a library game to another Proton, system-wine or native")
+    sr.add_argument("game", help="name or appid")
+    sr.add_argument("runner", help="internal name (see: proton-porter protons)")
+
     un = sub.add_parser("uninstall", help="uninstall a library game (shows the plan; --yes to do it)")
     un.add_argument("game", help="name or appid")
     un.add_argument("--remove-prefix", action="store_true", help="also move its Proton folder to the Trash")
@@ -127,10 +131,11 @@ def main(argv: list[str] | None = None) -> int:
         for e in steam.library(steam.users()[0]):
             print(f"{e.appid:<11} {e.name:30} {e.tool or '-':20} {e.exe}")
         return 0
-    if a.cmd in ("mods", "diagnose", "test", "retry", "install-archive", "install-proton", "update", "play", "logs", "install-repack", "uninstall"):
+    if a.cmd in ("mods", "diagnose", "test", "retry", "install-archive", "install-proton", "update", "play", "logs", "install-repack", "uninstall", "set-runner"):
         return _extra(a)
     if a.cmd == "protons":
-        for t in steam.protons():
+        from . import runners
+        for t in runners.all_runners():
             print(f"{t.internal:24} {t.display:24} {t.path}")
         return 0
 
@@ -151,8 +156,14 @@ def main(argv: list[str] | None = None) -> int:
         for d in info.dlls:
             if d.name == name:
                 d.enabled = True
-    tools = steam.protons()
-    tool = next((t for t in tools if t.internal == a.proton), None) if a.proton else steam.default_proton(tools)
+    from . import runners
+    tools = runners.all_runners()
+    if a.proton:
+        tool = next((t for t in tools if t.internal == a.proton), None)
+    elif info.native:
+        tool = runners.pseudo(runners.NATIVE)
+    else:
+        tool = steam.default_proton(steam.protons())
     if tool is None:
         print("No Proton found. Install one from Steam (Library > Tools) first.", file=sys.stderr)
         return 1
@@ -257,7 +268,8 @@ def _extra(a) -> int:
                 print(f"  {line}")
             return 0
         entry = runner.find_entry(users[0], a.game)
-        tools = steam.protons()
+        from . import runners
+        tools = runners.all_runners()
         workspace = getattr(a, "workspace", None)
         workspace = workspace if workspace is not None else s.test_workspace
         seconds = getattr(a, "seconds", None) or s.test_seconds
@@ -268,6 +280,23 @@ def _extra(a) -> int:
             for line in r.diagnosis.summary():
                 print(f"  {line}")
             return 0 if r.survived else 2
+        if a.cmd == "set-runner":
+            tool = next((t for t in tools if t.internal == a.runner), None)
+            if tool is None:
+                print(f"Unknown runner “{a.runner}”. Have: {', '.join(t.internal for t in tools)}", file=sys.stderr)
+                return 1
+            from .apply import switch_runner
+            was = steam.steam_running()
+            if was:
+                steam.close_steam()
+            try:
+                steam.backup(users[0], time.strftime("%Y%m%d-%H%M%S"))
+                switch_runner(users[0], entry, tool)
+            finally:
+                if was:
+                    steam.open_steam()
+            print(f"{entry.name} now runs with {tool.display}.")
+            return 0
         if a.cmd == "uninstall":
             from . import uninstall
             plan = uninstall.make_plan(entry, Path(s.games_dir).expanduser(), steam.library(users[0]))

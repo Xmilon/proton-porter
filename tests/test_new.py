@@ -213,6 +213,13 @@ class Archives(core.Sandbox):
 
 
 class Running(core.Sandbox):
+    def setUp(self):
+        super().setUp()
+        from proton_porter import runners
+        old = runners.wine_binary
+        runners.wine_binary = lambda: None  # never start the real Wine in tests
+        self.addCleanup(setattr, runners, "wine_binary", old)
+
     def spec(self, proton, fake, prefix=None):
         from proton_porter.runner import RunSpec
         return RunSpec(777, self.exe, self.exe.parent, proton, f"FAKE={fake} %command%", prefix)
@@ -465,3 +472,72 @@ class Uninstalling(core.Sandbox):
         core.tiny_pe(w / "g.exe")
         e = steam.LibraryEntry(3, "Game", w / "g.exe", w, "", "")
         self.assertEqual(uninstall.make_plan(e, self.games, [e]).folder, self.games / "Game-Site.com")
+
+
+class OtherRunners(core.Sandbox):
+    def test_wrapper_roundtrip_and_library(self):
+        from proton_porter import runners, steam
+        user = steam.users()[0]
+        script = runners.write_wrapper(self.exe, self.exe.parent)
+        self.assertEqual(runners.read_wrapper(script), self.exe.resolve())
+        self.assertIn("exec wine", script.read_text())
+        steam.write_shortcut(user, steam.Shortcut("My Game", script, script.parent))
+        e = steam.library(user)[0]
+        self.assertEqual((e.exe, e.tool), (self.exe.resolve(), runners.WINE))
+
+    def test_switch_runner(self):
+        from proton_porter import runners, steam
+        from proton_porter.apply import switch_runner
+        user = steam.users()[0]
+        appid, _ = steam.write_shortcut(user, steam.Shortcut("My Game", self.exe, self.exe.parent, "-x"))
+        steam.set_compat_tool(appid, "Proton-GE")
+        wine = steam.Proton(runners.WINE, "System Wine", Path("/usr/bin"))
+        switch_runner(user, steam.library(user)[0], wine)
+        e = steam.library(user)[0]
+        self.assertEqual((e.appid, e.tool, e.exe, e.launch_options), (appid, runners.WINE, self.exe.resolve(), "-x"))
+        self.assertNotIn(str(appid), steam.compat_mapping())
+        switch_runner(user, e, steam.Proton("Proton-GE", "GE", self.tmp))
+        e = steam.library(user)[0]
+        self.assertEqual((e.tool, e.exe), ("Proton-GE", self.exe.resolve()))
+
+    def test_native_game_added_without_proton(self):
+        from proton_porter import runners, steam
+        from proton_porter.analyze import analyze
+        from proton_porter.apply import Choices, apply
+        game = self.tmp / "Linux Game"
+        game.mkdir()
+        binary = game / "game.x86_64"
+        binary.write_bytes(b"\x7fELF" + b"\0" * 60)
+        binary.chmod(0o755)
+        a = analyze(binary, [])
+        self.assertTrue(a.native)
+        self.assertEqual((a.name, a.dlls, a.warnings), ("Linux Game", [], []))
+        user = steam.users()[0]
+        r = apply(a, "", Choices(name="Linux Game", proton=runners.pseudo(runners.NATIVE), user=user,
+                                 extra_env="FOO=1", args="--fullscreen"))
+        self.assertEqual(r.launch_options, "FOO=1 %command% --fullscreen")
+        self.assertNotIn(str(r.appid), steam.compat_mapping())
+        self.assertEqual(steam.library(user)[0].tool, runners.NATIVE)
+
+    def test_wine_command(self):
+        from proton_porter import runners, steam
+        from proton_porter.runner import RunSpec, build_command
+        spec = RunSpec(5, self.exe, self.exe.parent, steam.Proton(runners.WINE, "W", Path("/usr/bin")),
+                       'WINEDLLOVERRIDES="winmm=n,b" %command% -x')
+        cmd, env = build_command(spec, self.tmp / "log", "tok")
+        self.assertEqual(cmd[-3:], ["wine", str(self.exe), "-x"])
+        self.assertEqual(env["WINEPREFIX"], str(runners.wine_prefix(self.exe)))
+        self.assertEqual(env["WINEDLLOVERRIDES"], "winmm=n,b")
+        self.assertNotIn("STEAM_COMPAT_DATA_PATH", env)
+
+    def test_repack_with_wine(self):
+        from proton_porter import repack, runners, steam
+        d = self.tmp / "G [FitGirl Repack]"
+        d.mkdir()
+        core.tiny_pe(d / "setup.exe")
+        (d / "fg-01.bin").write_bytes(b"x")
+        cmd, env = repack.install_command(repack.detect(d), self.tmp / "Games/G",
+                                          steam.Proton(runners.WINE, "W", Path("/usr/bin")))
+        self.assertEqual(cmd[0], "wine")
+        self.assertTrue(cmd[2].startswith("/DIR=Z:"))
+        self.assertTrue(env["WINEPREFIX"].endswith("installer-prefix/wine"))

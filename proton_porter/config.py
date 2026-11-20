@@ -46,6 +46,7 @@ class Settings:
     test_seconds: int = 60
     check_updates: bool = True
     repack_check_md5: bool = True  # check FitGirl/DODI .bin files against their MD5 list first
+    repack_use_wine: bool = False  # run repack installers with the system's Wine instead of Proton
 
     @classmethod
     def load(cls) -> "Settings":

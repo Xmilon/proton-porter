@@ -73,6 +73,10 @@ def retry(entry: steam.LibraryEntry, user: steam.SteamUser, tools: list[steam.Pr
         raise RuntimeError("A Steam game is running. Close it first.")
     if not tools:
         raise RuntimeError("No Proton found")
+    from . import runners
+    if entry.tool == runners.NATIVE:
+        raise RuntimeError(f"{entry.name} is a Linux program; there are no Proton versions to try.")
+    tools = [t for t in tools if not runners.is_pseudo(t)]
     current = next((t for t in tools if t.internal == entry.tool), None) or steam.default_proton(tools)
     hint = ""
     try:
@@ -80,8 +84,13 @@ def retry(entry: steam.LibraryEntry, user: steam.SteamUser, tools: list[steam.Pr
         hint = next((m.proton for m in mods if m.proton), "")
     except OSError:
         pass
-    for i, att in enumerate(plan(current, tools, hint, limit), 1):
-        label = f"Attempt {i}: {att.proton.display}" + (", fresh prefix" if att.fresh_prefix else ", current prefix")
+    attempts = plan(current, tools, hint, limit)
+    wine = runners.pseudo(runners.WINE)
+    if wine and entry.tool != runners.WINE:  # last resort: the system's Wine, not Proton
+        attempts = attempts[:max(limit - 1, 1)] + [Attempt(wine, False)]
+    for i, att in enumerate(attempts, 1):
+        label = f"Attempt {i}: {att.proton.display}" + (
+            "" if runners.is_pseudo(att.proton) else ", fresh prefix" if att.fresh_prefix else ", current prefix")
         progress(label, None)
         trial = fresh_prefix_path(entry.appid)
         if att.fresh_prefix:
@@ -120,8 +129,9 @@ def _keep(entry: steam.LibraryEntry, user: steam.SteamUser, report: RetryReport,
     try:
         steam.backup(user, stamp)
         if win.proton.internal != entry.tool:
-            steam.set_compat_tool(entry.appid, win.proton.internal)
-            report.notes.append(f"Proton set to {win.proton.display}.")
+            from .apply import switch_runner
+            switch_runner(user, entry, win.proton)
+            report.notes.append(f"Now runs with {win.proton.display}.")
         if win.fresh_prefix:
             old = swap_in_prefix(entry.appid, fresh_prefix_path(entry.appid), stamp)
             report.notes.append("Using a fresh prefix." + (f" The old one is kept at {old}." if old else ""))

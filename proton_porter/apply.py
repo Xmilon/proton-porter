@@ -237,17 +237,23 @@ def _add_one(job: Job, progress: Progress) -> Result:
         exe = new_root / exe.relative_to(root)
         root = moved = new_root
 
+    from . import runners
     target = exe
     if a.bat_needs_copy:
         target = linux_bat(exe)
         notes.append(f"Made {target.name} (no pause/taskkill) and pointed Steam at it.")
     prefix = command_prefix(job.dll_overrides, c)
     args = c.args.strip()
-    if args and prefix and target.suffix.lower() == ".exe":
+    pseudo = runners.is_pseudo(c.proton)
+    if c.proton.internal == runners.WINE:
+        target = runners.write_wrapper(target, target.parent)
+        notes.append(f"Runs with the system's Wine through {target.name} (own prefix: {runners.wine_prefix(exe)}).")
+    if args and prefix and target.suffix.lower() == ".exe" and not pseudo:
         target = wrapper_bat(target, args)
         args = ""
         notes.append(f"Arguments go through {target.name}, since Steam can't combine them with variables.")
-    options = launch_options(prefix, args)
+    # Linux programs (and our Wine script) take "VARS %command% args" fine; only Proton shortcuts can't.
+    options = f"{prefix} %command% {args}".strip() if pseudo and prefix and args else launch_options(prefix, args)
 
     shortcut = steam.Shortcut(c.name.strip(), target, target.parent, options, allow_overlay=c.overlay)
     appid = steam.shortcut_appid(shortcut.exe_field, shortcut.name)
@@ -256,7 +262,10 @@ def _add_one(job: Job, progress: Progress) -> Result:
 
     progress(f"{c.name}: adding to Steam", None)
     appid, updated = steam.write_shortcut(c.user, shortcut)
-    steam.set_compat_tool(appid, c.proton.internal)
+    if pseudo:
+        steam.clear_compat_tool(appid)
+    else:
+        steam.set_compat_tool(appid, c.proton.internal)
     collection_ok = True
     if c.collection.strip():
         collection_ok = steam.add_to_collection(c.user, c.collection.strip(), appid)
@@ -272,7 +281,9 @@ def _add_one(job: Job, progress: Progress) -> Result:
             notes.append(f"No artwork: {error}.")
 
     copied = []
-    if c.saves:
+    if c.saves and pseudo:
+        notes.append("Saves weren't copied: that only works with Proton prefixes.")
+    elif c.saves:
         progress(f"{c.name}: creating the Proton prefix (the game is not started)", None)
         user_dir = steam.create_prefix(c.proton, appid)
         for s in c.saves:
@@ -354,3 +365,20 @@ def parse_env(text: str) -> str:
         if "=" not in p or not re.match(r"[A-Za-z_][A-Za-z0-9_]*=", p):
             raise ValueError(f"“{p}” isn't NAME=value")
     return " ".join(f"{k}={shlex.quote(v)}" for k, v in (p.split("=", 1) for p in parts))
+
+
+def switch_runner(user: steam.SteamUser, entry: steam.LibraryEntry, tool: steam.Proton) -> None:
+    """Make an existing library game use another Proton, System Wine, or no Proton. Steam must be closed."""
+    from . import runners
+    if tool.internal == runners.WINE:
+        target = runners.write_wrapper(entry.exe, entry.start_dir)
+        steam.write_shortcut(user, steam.Shortcut(entry.name, target, target.parent, entry.launch_options, entry.icon))
+        steam.clear_compat_tool(entry.appid)
+        return
+    if entry.tool == runners.WINE:  # back from the Wine script to the game itself
+        steam.write_shortcut(user, steam.Shortcut(entry.name, entry.exe, entry.start_dir, entry.launch_options,
+                                                  entry.icon))
+    if tool.internal == runners.NATIVE:
+        steam.clear_compat_tool(entry.appid)
+    else:
+        steam.set_compat_tool(entry.appid, tool.internal)
