@@ -94,6 +94,7 @@ class Analysis:
     other_exes: list[Path] = field(default_factory=list)
     mods: list = field(default_factory=list)  # knowledge.KnownMod
     native: bool = False  # a Linux program: added without Proton
+    emulator: object = None  # knowledge.Emulator when the game runs in a bundled emulator
 
 
 def game_root(exe: Path) -> Path:
@@ -378,6 +379,17 @@ def analyze(exe: Path, search_roots: list[Path] | None = None) -> Analysis:
         a.notes.append("Uses the Steam API: keep Steam running while playing.")
     if a.pe and not a.pe.is_64bit:
         a.notes.append("32-bit game.")
+
+    a.emulator = knowledge.detect_emulator(exe, root)
+    if a.emulator:
+        emu = a.emulator
+        games = ", ".join(r.name for r in emu.roms[:3]) or "none found"
+        if emu.ui_exe == exe:
+            a.notes.append(f"Emulator: {emu.name}. Game files: {games}. Steam starts the emulator's own window.")
+        else:
+            a.notes.append(f"Runs in an emulator: {emu.name} ({emu.ui_exe.name}). Game files: {games}. "
+                           f"You can also add the emulator itself as a second Steam entry.")
+        a.notes.append("A native Linux build of the emulator is usually smoother than the Windows one under Proton.")
 
     a.saves = find_saves(a, search_roots if search_roots is not None else default_search_roots())
     return a

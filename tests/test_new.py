@@ -610,3 +610,19 @@ class Helpers(core.Sandbox):
         from proton_porter.diagnose import Diagnosis, Finding
         r = runner.RunResult(False, 1, 1, None, Diagnosis([Finding("crash", "x", "d3d11.dll")], True), "P")
         self.assertEqual(doctor.fixes_for(r)[0].env, {"PROTON_USE_WINED3D": "1"})
+
+
+class Emulators(core.Sandbox):
+    def test_bundle_detected_with_roms(self):
+        from proton_porter.analyze import analyze
+        d = self.tmp / "Some Game"
+        (d / "games").mkdir(parents=True)
+        core.tiny_pe(d / "lichii.exe")
+        big = bytearray((d / "lichii.exe").read_bytes()) + b"\0" * 5000
+        (d / "fritchii.exe").write_bytes(bytes(big))
+        (d / "games/title.nup").write_bytes(b"x")
+        a = analyze(d / "lichii.exe", [])
+        self.assertEqual(a.emulator.ui_exe.name, "fritchii.exe")
+        self.assertEqual([r.name for r in a.emulator.roms], ["title.nup"])
+        self.assertTrue(any("second Steam entry" in n for n in a.notes))
+        self.assertIsNone(analyze(self.exe, []).emulator)

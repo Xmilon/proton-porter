@@ -400,6 +400,14 @@ class Window(Adw.ApplicationWindow):
         p.add(self.proton_row)
         self.args_row = Adw.EntryRow(title="Game arguments (optional)")
         p.add(self.args_row)
+        emu = a.emulator
+        self.emu_row = None
+        if emu is not None and emu.ui_exe != a.exe:
+            self.emu_row = Adw.SwitchRow(title="Also add the emulator itself",
+                                         subtitle=esc(f"A second Steam entry, “{a.name} (emulator)”, opens "
+                                                      f"{emu.ui_exe.name} for its settings and other games"),
+                                         active=True)
+            p.add(self.emu_row)
         self.env_row = Adw.EntryRow(title="Extra variables, e.g. DXVK_HUD=fps (optional)", text=s.extra_env)
         p.add(self.env_row)
         self.overlay_row = Adw.SwitchRow(title="Steam overlay", active=s.overlay,
@@ -569,7 +577,15 @@ class Window(Adw.ApplicationWindow):
         except ValueError as error:
             self.error("Check the form", str(error))
             return
-        self.run_jobs([Job(self.analysis, dlls, c)])
+        jobs = [Job(self.analysis, dlls, c)]
+        emu = self.analysis.emulator
+        if self.emu_row is not None and self.emu_row.get_active():
+            from dataclasses import replace
+            ea = analyze(emu.ui_exe, [])
+            # same folder, so no second move; same Proton and options as the game
+            jobs.append(Job(ea, overrides_string(ea.dlls), replace(c, name=f"{c.name} (emulator)", move_to=None,
+                                                                    saves=[], args="")))
+        self.run_jobs(jobs)
 
     # ------------------------------------------------------------ scan tab
 
@@ -1132,18 +1148,36 @@ class Window(Adw.ApplicationWindow):
         SettingsDialog(self).present(self)
 
     def on_guide(self, *_):
-        """What works, what doesn't, and what to do when a game won't start (data/guide.md)."""
+        """What works, what doesn't, and what to do when a game won't start (data/guide.md), as a
+        normal window: one group per section, one row per point, readable width."""
+        import re
         try:
             text = resources.files("proton_porter").joinpath("data/guide.md").read_text(encoding="utf-8")
         except (OSError, ModuleNotFoundError):
-            text = "# Guide missing\nReinstall Proton Porter."
-        label = Gtk.Label(use_markup=True, wrap=True, xalign=0, selectable=True,
-                          label=guide_markup(text), margin_start=18, margin_end=18, margin_top=12, margin_bottom=18)
-        scroll = Gtk.ScrolledWindow(child=label, min_content_height=480, min_content_width=560,
-                                    hscrollbar_policy=Gtk.PolicyType.NEVER)
-        alert = compat.AlertDialog(heading="Compatibility guide", extra_child=scroll)
-        alert.add_response("ok", "OK")
-        alert.present(self)
+            text = "# Guide missing\n- Reinstall Proton Porter."
+        page = Adw.PreferencesPage()
+        group = None
+
+        def markup(t: str) -> str:
+            t = esc(t)
+            return re.sub(r"`(.+?)`", r"<tt>\1</tt>", re.sub(r"\*\*(.+?)\*\*", r"\1", t))
+        for line in text.splitlines():
+            if line.startswith("# "):
+                group = Adw.PreferencesGroup(title=esc(line[2:]))
+                page.add(group)
+            elif line.startswith("- ") and group is not None:
+                m = re.match(r"- \*\*(.+?):?\*\*:?\s*(.*)", line)
+                title, body = (m.group(1).rstrip(":"), m.group(2)) if m else ("", line[2:])
+                body = body[:1].upper() + body[1:]
+                row = Adw.ActionRow(title=markup(title) if title else markup(body),
+                                    subtitle=markup(body) if title else "", subtitle_lines=0, title_lines=0)
+                group.add(row)
+        view = Adw.ToolbarView(content=page)
+        view.add_top_bar(Adw.HeaderBar())
+        win = Adw.Window(title="Compatibility guide", content=view, default_width=760, default_height=760,
+                         modal=True, transient_for=self)
+        win.present()
+        self.guide_window = win  # debug snapshots (PROTON_PORTER_VIEW=guide) draw this one
 
     def on_about(self, *_):
         about = compat.AboutDialog(application_name="Proton Porter", version=__version__, application_icon=APP_ID,
@@ -1428,7 +1462,10 @@ def render_png(widget: Gtk.Widget, path: str) -> bool:
 
 class App(Adw.Application):
     def __init__(self):
-        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_OPEN)
+        flags = Gio.ApplicationFlags.HANDLES_OPEN
+        if os.environ.get("PROTON_PORTER_SNAPSHOT"):  # debug snapshots run beside an open window
+            flags |= Gio.ApplicationFlags.NON_UNIQUE
+        super().__init__(application_id=APP_ID, flags=flags)
         self.connect("activate", lambda *_: self.window())
         self.connect("open", self.on_open)
 
@@ -1445,7 +1482,10 @@ class App(Adw.Application):
                 win.tabs.set_visible_child_name("library")
             elif view == "settings":
                 win.on_settings()
-            GLib.timeout_add(int(os.environ.get("PROTON_PORTER_SNAPSHOT_DELAY", "3000")), render_png, win, shot)
+            elif view == "guide":
+                win.on_guide()
+            GLib.timeout_add(int(os.environ.get("PROTON_PORTER_SNAPSHOT_DELAY", "3000")),
+                             lambda: render_png(getattr(win, "guide_window", None) or win, shot))
         return win
 
     def on_open(self, _app, files, *_):

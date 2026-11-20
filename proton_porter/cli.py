@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import __version__, steam
 from .analyze import analyze, overrides_string
-from .apply import Choices, apply, describe, parse_env
+from .apply import Choices, Job, apply, apply_many, describe, parse_env
 from .config import Settings
 
 
@@ -60,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
     add.add_argument("--gamemode", action="store_true")
     add.add_argument("--log", action="store_true", help="PROTON_LOG=1")
     add.add_argument("--artwork", action="store_true", help="fetch SteamGridDB artwork (key from Settings)")
+    add.add_argument("--with-emulator", action="store_true",
+                     help="for games in an emulator bundle: also add the emulator itself as a second entry")
     add.add_argument("--dry-run", action="store_true")
 
     sc = sub.add_parser("scan", help="list the games in a folder's sub-folders")
@@ -191,7 +193,19 @@ def main(argv: list[str] | None = None) -> int:
     print(describe(info, overrides_string(info.dlls), c))
     if a.dry_run:
         return 0
-    r = apply(info, overrides_string(info.dlls), c, lambda msg, frac: print(f"  {msg}" + (f" {frac:.0%}" if frac else "")))
+    jobs = [Job(info, overrides_string(info.dlls), c)]
+    if a.with_emulator and info.emulator is not None and info.emulator.ui_exe != info.exe:
+        from dataclasses import replace
+        ea = analyze(info.emulator.ui_exe, [])
+        jobs.append(Job(ea, overrides_string(ea.dlls), replace(c, name=f"{c.name} (emulator)", move_to=None,
+                                                             saves=[], args="")))
+    results = apply_many(jobs, _progress, Settings.load().keep_backups, c.restart_steam)
+    for extra in results[1:]:
+        print(f"Also added: {extra.name} (appid {extra.appid})" if not isinstance(extra, Exception)
+              else f"Couldn't add the emulator entry: {extra}")
+    r = results[0]
+    if isinstance(r, Exception):
+        raise r
     print(f"\nDone: “{r.name}” (appid {r.appid}) {'updated' if r.updated else 'added'}. Backup: {r.backup}")
     for n in r.notes:
         print(f"  {n}")
