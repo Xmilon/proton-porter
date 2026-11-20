@@ -12,7 +12,10 @@ fixes already applied. Pick the game's `.exe` and Proton Porter:
   the game at once under Proton. Proton Porter makes a `-linux.bat` copy
   without those lines.
 - **can move the game folder** to your games folder (copies, checks the copy,
-  then deletes the original).
+  then deletes the original). It won't move a folder that is still being
+  extracted or copied.
+- **spots incomplete folders**: if the `.exe` needs a DLL that is neither next
+  to it nor part of Proton (say `UnityPlayer.dll`), it warns you before adding.
 - **adds it to Steam** as a non-Steam game, sets the Proton version, adds the
   icon from the `.exe`, and puts it in a collection (default: **Linux**).
 - **imports old saves**: it looks in `~/Documents`, `~/Old Windows` (or any
@@ -48,8 +51,8 @@ collections file to `~/.local/state/proton-porter/backups/<date>` first.
 Arch / Omarchy, from a release:
 
 ```sh
-tar xf proton-porter-1.0.0.tar.gz
-cd proton-porter-1.0.0
+tar xf proton-porter-1.1.1.tar.gz
+cd proton-porter-1.1.1
 ./install.sh            # installs the deps with pacman if missing
 ```
 

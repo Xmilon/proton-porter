@@ -157,6 +157,55 @@ def detect_engine(exe: Path, root: Path, pe: PEInfo | None) -> str:
     return "Unknown"
 
 
+_BUILTIN_CACHE: set[str] | None = None
+
+
+def builtin_dlls() -> set[str]:
+    """Lower-case names of the DLLs Wine/Proton provide, from any Proton (or Wine) found."""
+    global _BUILTIN_CACHE
+    if _BUILTIN_CACHE is None:
+        dirs = [Path("/usr/lib/wine/x86_64-windows"), Path("/usr/lib/wine/i386-windows"),
+                Path("/usr/lib32/wine/i386-windows")]
+        try:
+            from . import steam
+            for p in steam.protons():
+                dirs += [p.path / "files/lib/wine/x86_64-windows", p.path / "files/lib/wine/i386-windows",
+                         p.path / "files/lib64/wine/x86_64-windows", p.path / "files/lib/wine/dxvk",
+                         p.path / "files/lib/wine/vkd3d-proton"]
+        except Exception:  # noqa: BLE001 - no Steam is fine, fall back to system Wine
+            pass
+        names: set[str] = set()
+        for d in dirs:
+            try:
+                names |= {f.name.lower() for f in d.iterdir()}
+            except OSError:
+                continue
+        _BUILTIN_CACHE = names
+    return _BUILTIN_CACHE
+
+
+def missing_dlls(exe: Path, imports: list[str]) -> list[str]:
+    """DLLs the .exe links against that are neither next to it nor provided by Wine.
+
+    A non-empty result almost always means the game folder is incomplete (an
+    archive still extracting, a failed copy, an antivirus quarantine).
+    """
+    builtin = builtin_dlls()
+    if not builtin:
+        return []
+    try:
+        local = {p.name.lower() for p in exe.parent.iterdir()}
+    except OSError:
+        return []
+    out = []
+    for name in imports:
+        low = name.lower()
+        if low in local or low in builtin or low.startswith(("api-ms-win-", "ext-ms-")):
+            continue
+        out.append(name)
+    return out
+
+
 def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
@@ -244,6 +293,13 @@ def analyze(exe: Path, search_roots: list[Path] | None = None) -> Analysis:
             a.pe = PEFile(exe).info()
         except (PEError, OSError) as error:
             a.warnings.append(f"Couldn't read the .exe ({error}). It may not be a Windows program.")
+        if a.pe:
+            gone = missing_dlls(exe, a.pe.imports)
+            if gone:
+                a.warnings.append(
+                    f"The game folder looks incomplete: {', '.join(gone)} is missing next to the .exe. "
+                    "If you're still extracting or copying it, wait until that finishes. Otherwise "
+                    "extract it again (an antivirus may have removed files).")
         a.engine = detect_engine(exe, root, a.pe)
         a.unity_ids = unity_ids(exe)
         product = (a.pe.version.get("ProductName") if a.pe else "") or ""
@@ -292,6 +348,9 @@ def analyze(exe: Path, search_roots: list[Path] | None = None) -> Analysis:
         a.notes.append("XNA game: if it won't start, run: protontricks <appid> xna40")
     elif a.engine == ".NET":
         a.notes.append(".NET game: Proton's Wine Mono usually works; if not, run: protontricks <appid> dotnet48")
+    if "onlinefix64.dll" in names or "onlinefix.ini" in names:
+        a.notes.append("OnlineFix build: Steam has to be running and logged in while you play "
+                       "(it goes through Steam's Spacewar app for online play).")
     if "galaxy.dll" in names or "galaxy64.dll" in names:
         a.notes.append("GOG build (Galaxy DLL present).")
     if "steam_api.dll" in names or "steam_api64.dll" in names:

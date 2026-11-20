@@ -59,6 +59,8 @@ class Sandbox(unittest.TestCase):
         saves.mkdir(parents=True)
         (saves / "slot.sav").write_text("x")
         self.exe = game / "MyGame-Win64-Shipping.exe"
+        from proton_porter import apply
+        apply.MOVE_QUIET_SECONDS = 0
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
@@ -121,6 +123,38 @@ class Sandbox(unittest.TestCase):
         self.assertFalse((self.tmp / "Old/My Game").exists())
         self.assertEqual(r.exe.name, "MyGame-Win64-Shipping-linux.bat")
         self.assertEqual(r.launch_options, 'WINEDLLOVERRIDES="winmm=n,b" %command%')
+
+    def test_busy_folder_not_moved(self):
+        from proton_porter import apply
+        root = self.tmp / "Old/My Game"
+        self.assertIsNone(apply.folder_busy(root, 0))
+        self.assertIn("changed", apply.folder_busy(root, 60))
+        import subprocess, sys, time
+        writer = subprocess.Popen([sys.executable, "-c",
+                                   f"f=open({str(root / 'part.tmp')!r},'w'); import time; time.sleep(30)"])
+        try:
+            for _ in range(50):
+                if (root / "part.tmp").exists():
+                    break
+                time.sleep(0.05)
+            self.assertIn("writing", apply.folder_busy(root, 0) or "")
+        finally:
+            writer.kill()
+            writer.wait()
+        apply.MOVE_QUIET_SECONDS = 60
+        with self.assertRaises(RuntimeError):
+            apply.move_game(root, self.tmp / "Games", lambda *_: None)
+        self.assertTrue(root.exists())
+
+    def test_missing_dlls(self):
+        from proton_porter import analyze
+        analyze._BUILTIN_CACHE = {"kernel32.dll"}
+        try:
+            (self.exe.parent / "UnityPlayer.dll").write_bytes(b"MZ")
+            self.assertEqual(analyze.missing_dlls(self.exe, ["KERNEL32.dll", "UnityPlayer.dll", "GameAssembly.dll"]),
+                             ["GameAssembly.dll"])
+        finally:
+            analyze._BUILTIN_CACHE = None
 
     def test_remove_and_restore(self):
         from proton_porter import steam

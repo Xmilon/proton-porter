@@ -74,8 +74,52 @@ def _tree_size(path: Path) -> tuple[int, int]:
     return files, size
 
 
+# A folder whose files changed this recently is probably still being extracted.
+# Uses ctime too: extractors restore the archive's old mtimes.
+MOVE_QUIET_SECONDS = 20.0
+
+
+def folder_busy(src: Path, quiet_seconds: float | None = None) -> str | None:
+    """Why the folder shouldn't be moved yet (still being extracted or copied), or None."""
+    if quiet_seconds is None:
+        quiet_seconds = MOVE_QUIET_SECONDS
+    src = src.resolve()
+    prefix = str(src) + os.sep
+    # Another program has a file in it open for writing.
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit() or int(proc.name) == os.getpid():
+            continue
+        try:
+            for fd in (proc / "fd").iterdir():
+                try:
+                    target = os.readlink(fd)
+                except OSError:
+                    continue
+                if target.startswith(prefix):
+                    flags = (proc / "fdinfo" / fd.name).read_text().split("flags:")[1].split()[0]
+                    if int(flags, 8) & (os.O_WRONLY | os.O_RDWR):
+                        comm = (proc / "comm").read_text().strip()
+                        return f"{comm} is still writing to it"
+        except (OSError, IndexError, ValueError):
+            continue
+    # Something changed in it a moment ago.
+    newest = 0.0
+    for p in [src, *src.rglob("*")]:
+        try:
+            newest = max(newest, p.lstat().st_mtime, p.lstat().st_ctime)
+        except OSError:
+            continue
+    if time.time() - newest < quiet_seconds:
+        return "files in it changed a few seconds ago"
+    return None
+
+
 def move_game(src: Path, parent: Path, progress: Progress) -> Path:
     """Move a game folder, verifying the copy before deleting the original."""
+    busy = folder_busy(src)
+    if busy:
+        raise RuntimeError(f"Not moving {src.name}: {busy}. If it's still being extracted or "
+                           "copied, wait for that to finish and try again.")
     parent.mkdir(parents=True, exist_ok=True)
     dest = parent / src.name
     if dest.resolve() == src.resolve():
@@ -101,6 +145,10 @@ def move_game(src: Path, parent: Path, progress: Progress) -> Path:
     progress("Checking the copy", None)
     if _tree_size(dest) != (files, total):
         raise RuntimeError("The copy doesn't match the original; nothing was deleted")
+    if _tree_size(src) != (files, total):
+        shutil.rmtree(dest)
+        raise RuntimeError(f"{src.name} changed while it was being copied (still extracting?). "
+                           "Nothing was deleted; try again once it's finished.")
     progress("Removing the original", None)
     shutil.rmtree(src)
     return dest
