@@ -139,5 +139,8 @@ def execute(plan: Plan, proton: steam.Proton | None, remove_prefix: bool,
         progress("Moving the Proton folder to the Trash", None)
         trash(plan.prefix)
         notes.append(f"Moved {plan.prefix} to the Trash.")
+    from . import desktop
+    if desktop.remove(plan.appid):
+        notes.append("Removed its app-launcher entry.")
     notes += [f"Didn't touch the files: {b}." for b in plan.blocked]
     return notes

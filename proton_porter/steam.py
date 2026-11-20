@@ -445,6 +445,20 @@ def library(user: SteamUser) -> list[LibraryEntry]:
     return out
 
 
+def set_launch_options(user: SteamUser, appid: int, options: str) -> bool:
+    """Change one shortcut's launch options, leaving everything else as it is. Steam must be closed."""
+    path = user.config / "shortcuts.vdf"
+    data = _bload(path)
+    for e in data.get("shortcuts", {}).values():
+        if (int(e.get("appid", 0)) & 0xFFFFFFFF) == appid:
+            key = next((k for k in e if k.lower() == "launchoptions"), "LaunchOptions")
+            e[key] = options
+            with open(path, "wb") as fh:
+                vdf.binary_dump(data, fh)
+            return True
+    return False
+
+
 def clear_compat_tool(appid: int) -> None:
     """Forget the game's Proton choice (it then runs as a Linux program)."""
     cfg_path = steam_root() / "config/config.vdf"

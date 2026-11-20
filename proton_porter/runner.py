@@ -107,6 +107,32 @@ def build_command(spec: RunSpec, log_dir: Path, token: str) -> tuple[list[str], 
     return cmd, env
 
 
+# Wine/Proton helper processes: they carry the token too but aren't the game.
+INFRA = {"wineserver", "services.exe", "winedevice.exe", "plugplay.exe", "svchost.exe", "explorer.exe",
+         "rpcss.exe", "tabtip.exe", "xalia.exe", "conhost.exe", "steam.exe", "start.exe", "cmd.exe",
+         "rundll32.exe", "wineboot.exe", "winemenubuilder.exe", "mscorsvw.exe", "lsass.exe"}
+
+
+def _game_pids(token: str) -> list[int]:
+    """Windows programs of this run that are still alive, other than Wine's own helpers.
+    Loaders (nvse_loader, launchers) exit after starting the game; the game shows up here."""
+    needle = f"{TOKEN_VAR}={token}".encode()
+    out = []
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            if needle not in (proc / "environ").read_bytes().split(b"\0"):
+                continue
+            argv0 = (proc / "cmdline").read_bytes().split(b"\0")[0].decode(errors="replace")
+        except OSError:
+            continue
+        name = argv0.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if name.endswith(".exe") and name not in INFRA:
+            out.append(int(proc.name))
+    return out
+
+
 def _kill_token(token: str, grace: float = 3.0) -> None:
     """End every process that carries this test's token (the game, wine, wineserver)."""
     needle = f"{TOKEN_VAR}={token}".encode()
@@ -211,14 +237,17 @@ def run_test(spec: RunSpec, workspace: int | None, seconds: float = 60, progress
     _launch(cmd, env, cwd, workspace, pidfile, rcfile)
     t0 = time.time()
     code: int | None = None
+    exited_at: float | None = None  # when the launched program itself ended
     try:
         while time.time() - t0 < seconds:
-            if rcfile.exists():
+            if exited_at is None and rcfile.exists():
                 try:
                     code = int(rcfile.read_text().strip() or 0)
                 except ValueError:
                     code = -1
-                break
+                exited_at = time.time()
+            if exited_at is not None and not _game_pids(token) and time.time() - exited_at > 3:
+                break  # nothing of the game left (3 s grace for a loader's child to appear)
             progress(f"Running with {spec.proton.display}", min((time.time() - t0) / seconds, 1.0))
             if workspace is not None and workspace_support():
                 herd_windows(spec.appid, workspace, spec.exe.name.lower())
@@ -229,7 +258,10 @@ def run_test(spec: RunSpec, workspace: int | None, seconds: float = 60, progress
     log = find_log(log_dir, spec.appid)
     diagnosis = parse_file(log, spec.appid) if log else Diagnosis()
     diagnosis.findings += parse_game_logs(cwd, t0)
-    survived = code is None and not diagnosis.crashed and not diagnosis.game_log_errors
+    alive_at_end = took >= seconds  # the loop only runs out of time while something of the game lives
+    if alive_at_end and code is not None:
+        code = None  # a loader exited, but the game it started was still running
+    survived = alive_at_end and not diagnosis.crashed and not diagnosis.game_log_errors
     return RunResult(survived, took, code, log, diagnosis, spec.proton.display, spec_prefix)
 
 
@@ -308,7 +340,8 @@ def _alive(pid: int) -> bool:
 
 
 def prune_logs(keep: int = 20) -> None:
-    runs = sorted((state_dir() / "logs").glob("*"), key=lambda p: p.stat().st_mtime, reverse=True)
+    runs = sorted((p for p in (state_dir() / "logs").glob("*") if not p.name.endswith("-steam")),
+                  key=lambda p: p.stat().st_mtime, reverse=True)
     for old in runs[keep:]:
         shutil.rmtree(old, ignore_errors=True)
 
@@ -323,26 +356,37 @@ def play(spec: RunSpec, poll: float = 1.0, keep_logs: int = 20) -> RunResult:
     prefix = None if runners.is_pseudo(spec.proton) else (spec.prefix or steam.prefix_dir(spec.appid))
     if prefix:
         prefix.mkdir(parents=True, exist_ok=True)
-    cmd, env = build_command(spec, log_dir, uuid.uuid4().hex)
+    token = uuid.uuid4().hex
+    cmd, env = build_command(spec, log_dir, token)
     pidfile, rcfile = log_dir / "pid", log_dir / "exit-code"
     cwd = spec.start_dir if spec.start_dir.is_dir() else spec.exe.parent
     _launch(cmd, env, cwd, None, pidfile, rcfile)
     t0 = time.time()
     code: int | None = None
-    while code is None:
-        if rcfile.exists():
-            try:
-                code = int(rcfile.read_text().strip() or 0)
-            except ValueError:
-                code = -1
-        elif pidfile.exists() and not _alive(int(pidfile.read_text().strip() or 0)):
-            code = -1  # killed before it could record an exit code
-        else:
-            time.sleep(poll)
+    exited_at: float | None = None
+    game_seen = False
+    while True:
+        if exited_at is None:
+            if rcfile.exists():
+                try:
+                    code = int(rcfile.read_text().strip() or 0)
+                except ValueError:
+                    code = -1
+                exited_at = time.time()
+            elif pidfile.exists() and not _alive(int(pidfile.read_text().strip() or 0)):
+                code, exited_at = -1, time.time()  # killed before it could record an exit code
+        if exited_at is not None:
+            if _game_pids(token):
+                game_seen = True  # a loader ended, the game it started is running
+            elif time.time() - exited_at > 3:
+                break
+        time.sleep(poll)
+    if game_seen:
+        code = None  # the loader's exit code says nothing about the game: judge by the logs
     log = find_log(log_dir, spec.appid)
     diagnosis = parse_file(log, spec.appid) if log else Diagnosis()
     diagnosis.findings += parse_game_logs(cwd, t0)
-    crashed = code != 0 or diagnosis.crashed or diagnosis.game_log_errors
+    crashed = (code is not None and code != 0) or diagnosis.crashed or diagnosis.game_log_errors
     result = RunResult(not crashed, time.time() - t0, code, log if crashed else None, diagnosis,
                        spec.proton.display, prefix)
     if crashed:
@@ -351,3 +395,35 @@ def play(spec: RunSpec, poll: float = 1.0, keep_logs: int = 20) -> RunResult:
     else:
         shutil.rmtree(log_dir, ignore_errors=True)
     return result
+
+
+def steam_log_dir(appid: int) -> Path:
+    return state_dir() / "logs" / f"{appid}-steam"
+
+
+def steam_logging(options: str) -> bool:
+    return "PROTON_LOG=1" in (options or "").split()
+
+
+def with_steam_logging(options: str, appid: int, on: bool) -> str:
+    """Launch options with PROTON_LOG on or off, so launches from Steam leave a log Proton Porter reads."""
+    words = [w for w in shlex.split(options or "") if not w.startswith(("PROTON_LOG=", "PROTON_LOG_DIR="))]
+    if "%command%" not in words:
+        if words:  # plain arguments: Steam can't combine them with variables for non-Steam games
+            raise RuntimeError("This game passes arguments without %command%, so a log variable can't be added. "
+                               "Use “Test & diagnose” instead.")
+        words = ["%command%"]
+    if on:
+        words = ["PROTON_LOG=1", f"PROTON_LOG_DIR={steam_log_dir(appid)}"] + words
+    if on:
+        steam_log_dir(appid).mkdir(parents=True, exist_ok=True)
+
+    def q(w: str) -> str:  # quote only the value of VAR=value, or the shell stops seeing an assignment
+        if w == "%command%":
+            return w
+        k, eq, v = w.partition("=")
+        if eq and k.replace("_", "").isalnum() and words.index(w) < words.index("%command%"):
+            return f"{k}={shlex.quote(v)}" if shlex.quote(v) == v else f'{k}="{v}"'
+        return shlex.quote(w)
+    out = " ".join(q(w) for w in words)
+    return "" if out == "%command%" else out

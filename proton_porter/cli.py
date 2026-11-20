@@ -105,6 +105,19 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--no-check", action="store_true", help="skip the MD5 check")
     rp.add_argument("--add", action="store_true", help="then add it to Steam")
 
+    fx = sub.add_parser("fix", help="test a game, try the fixes its log suggests, then other Protons; keep what works")
+    fx.add_argument("game", help="name or appid")
+    fx.add_argument("--workspace", type=int)
+    fx.add_argument("--seconds", type=int)
+
+    ln = sub.add_parser("launcher", help="add or remove a game's entry in the desktop's app launcher")
+    ln.add_argument("game", help="name or appid")
+    ln.add_argument("state", choices=["on", "off"])
+
+    sl = sub.add_parser("steam-log", help="log Proton when a game is started from Steam")
+    sl.add_argument("game", help="name or appid")
+    sl.add_argument("state", choices=["on", "off"])
+
     sr = sub.add_parser("set-runner", help="switch a library game to another Proton, system-wine or native")
     sr.add_argument("game", help="name or appid")
     sr.add_argument("runner", help="internal name (see: proton-porter protons)")
@@ -129,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         for e in steam.library(steam.users()[0]):
             print(f"{e.appid:<11} {e.name:30} {e.tool or '-':20} {e.exe}")
         return 0
-    if a.cmd in ("mods", "diagnose", "test", "retry", "install-archive", "install-proton", "update", "play", "logs", "install-repack", "uninstall", "set-runner"):
+    if a.cmd in ("mods", "diagnose", "test", "retry", "install-archive", "install-proton", "update", "play", "logs", "install-repack", "uninstall", "set-runner", "fix", "launcher", "steam-log"):
         return _extra(a)
     if a.cmd == "protons":
         from . import runners
@@ -288,6 +301,31 @@ def _extra(a) -> int:
             for line in r.diagnosis.summary():
                 print(f"  {line}")
             return 0 if r.survived else 2
+        if a.cmd == "fix":
+            from . import doctor
+            rep = doctor.fix_it(entry, users[0], workspace, seconds, _progress)
+            print("\n".join(rep.lines()))
+            return 0 if rep.fixed else 2
+        if a.cmd == "launcher":
+            from . import desktop
+            if a.state == "on":
+                print(f"Added: {desktop.add(entry)}")
+            else:
+                print("Removed." if desktop.remove(entry.appid) else "It wasn't in the launcher.")
+            return 0
+        if a.cmd == "steam-log":
+            opts = runner.with_steam_logging(entry.launch_options, entry.appid, a.state == "on")
+            was = steam.steam_running()
+            if was:
+                steam.close_steam()
+            try:
+                steam.backup(users[0], time.strftime("%Y%m%d-%H%M%S"))
+                steam.set_launch_options(users[0], entry.appid, opts)
+            finally:
+                if was:
+                    steam.open_steam()
+            print(f"Launch options: {opts or '(none)'}")
+            return 0
         if a.cmd == "set-runner":
             tool = next((t for t in tools if t.internal == a.runner), None)
             if tool is None:

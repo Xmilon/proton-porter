@@ -17,7 +17,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from . import __version__, archive, compat, protontools, repack, retry, runner, runners, steam, uninstall, update  # noqa: E402
+from . import __version__, archive, compat, desktop, doctor, protontools, repack, retry, runner, runners, steam, uninstall, update  # noqa: E402
 from .analyze import (Analysis, DllChoice, SaveCandidate, analyze, default_search_roots,  # noqa: E402
                       overrides_string, scan_folder)
 from .apply import Choices, Job, apply_many, data_dir, describe, parse_env  # noqa: E402
@@ -108,6 +108,7 @@ class Window(Adw.ApplicationWindow):
         self.tabs = Adw.ViewStack()
         header.set_title_widget(Adw.ViewSwitcher(stack=self.tabs, policy=Adw.ViewSwitcherPolicy.WIDE))
         menu = Gio.Menu()
+        menu.append("Compatibility guide", "win.guide")
         menu.append("Check for updates", "win.update")
         menu.append("Settings", "win.settings")
         menu.append(f"{MAKER} on GitHub", "win.github")
@@ -117,6 +118,7 @@ class Window(Adw.ApplicationWindow):
         view.set_content(self.tabs)
         for name, cb in (("settings", self.on_settings), ("about", self.on_about),
                          ("update", lambda *_: self.check_update(True)),
+                         ("guide", self.on_guide),
                          ("github", lambda *_: open_uri(MAKER_URL))):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", cb)
@@ -711,6 +713,17 @@ class Window(Adw.ApplicationWindow):
                          lambda r, _p, e=e, choices=choices, current=current:
                          r.get_selected() != current and self.change_runner(e, choices[r.get_selected()]))
             row.add_row(runs)
+            launcher = Adw.SwitchRow(title="Show in the app launcher", subtitle="With the game's icon; starts it through Steam",
+                                     active=desktop.exists(e.appid))
+            launcher.connect("notify::active", lambda r, _p, e=e: self.toggle_launcher(e, r.get_active()))
+            row.add_row(launcher)
+            logging_on = runner.steam_logging(e.launch_options)
+            slog = Adw.SwitchRow(title="Log Steam launches",
+                                 subtitle="Keeps a Proton log when you start it from Steam; see “Latest log”",
+                                 active=logging_on, sensitive=not runners.is_pseudo(e.tool))
+            slog.connect("notify::active", lambda r, _p, e=e, was=logging_on:
+                         r.get_active() != was and self.toggle_steam_log(e, r.get_active()))
+            row.add_row(slog)
             if e.launch_options:
                 row.add_row(Adw.ActionRow(title="Launch options", subtitle=esc(e.launch_options),
                                           subtitle_selectable=True))
@@ -723,6 +736,7 @@ class Window(Adw.ApplicationWindow):
                 ("Latest log", lambda e=e: self.show_latest_log(e), None, True),
                 ("Game folder", lambda e=e: open_path(e.start_dir), None, e.start_dir.is_dir()),
                 ("Proton folder", lambda p=prefix: open_path(p / "pfx/drive_c"), None, (prefix / "pfx/drive_c").is_dir()),
+                ("Fix it…", lambda e=e: self.fix_game(e), "suggested-action", e.exe.is_file()),
                 ("Test & diagnose", lambda e=e: self.test_game(e), None, e.exe.is_file()),
                 ("Try other Protons", lambda e=e: self.retry_game(e), None, e.exe.is_file()),
                 ("Protontricks", lambda e=e: self.protontricks(e), None, tool_installed("protontricks")),
@@ -898,6 +912,45 @@ class Window(Adw.ApplicationWindow):
                      "Deletes its Windows folder (settings, protontricks installs, and any saves kept there). "
                      "Proton makes a fresh one on the next start. The game itself isn't touched.",
                      "Reset", go, destructive=True)
+
+    def toggle_launcher(self, e: steam.LibraryEntry, on: bool) -> None:
+        try:
+            if on:
+                desktop.add(e)
+                self.toast(f"{e.name} is in the app launcher")
+            else:
+                desktop.remove(e.appid)
+                self.toast(f"Removed {e.name} from the app launcher")
+        except OSError as err:
+            self.error("Couldn't change the launcher entry", str(err))
+
+    def toggle_steam_log(self, e: steam.LibraryEntry, on: bool) -> None:
+        try:
+            opts = runner.with_steam_logging(e.launch_options, e.appid, on)
+        except RuntimeError as err:
+            self.error("Can't log Steam launches", str(err))
+            self.refresh_library()
+            return
+        self.run_steam_task("Changing launch options", lambda: steam.set_launch_options(self.user, e.appid, opts),
+                            f"Steam launches of {e.name} are logged now. Play it, then open “Latest log”."
+                            if on else f"Stopped logging {e.name}")
+
+    def fix_game(self, e: steam.LibraryEntry) -> None:
+        ws, secs = self.settings.test_workspace, self.settings.test_seconds
+
+        def go():
+            def done(rep):
+                if isinstance(rep, Exception):
+                    self.error("Fix it stopped", str(rep))
+                    return
+                self.error(f"{e.name}: fixed" if rep.fixed else f"{e.name}: no fix found", "\n".join(rep.lines()))
+                self.refresh_library()
+            self.run_task(f"Fixing {e.name}", lambda progress: doctor.fix_it(e, self.user, ws, secs, progress), done)
+        self.confirm(f"Find a fix for {e.name}?",
+                     f"Starts the game {runner.where(ws)} for {secs} seconds at a time: as it is, then with the fixes "
+                     "its log points to (protontricks components, WineD3D), then other Proton versions, a fresh "
+                     "Proton folder and the system's Wine. The first that works is kept. "
+                     "Takes a few minutes; protontricks windows may open.", "Start", go)
 
     def change_runner(self, e: steam.LibraryEntry, tool: steam.Proton) -> None:
         from .apply import switch_runner
@@ -1077,6 +1130,20 @@ class Window(Adw.ApplicationWindow):
 
     def on_settings(self, *_):
         SettingsDialog(self).present(self)
+
+    def on_guide(self, *_):
+        """What works, what doesn't, and what to do when a game won't start (data/guide.md)."""
+        try:
+            text = resources.files("proton_porter").joinpath("data/guide.md").read_text(encoding="utf-8")
+        except (OSError, ModuleNotFoundError):
+            text = "# Guide missing\nReinstall Proton Porter."
+        label = Gtk.Label(use_markup=True, wrap=True, xalign=0, selectable=True,
+                          label=guide_markup(text), margin_start=18, margin_end=18, margin_top=12, margin_bottom=18)
+        scroll = Gtk.ScrolledWindow(child=label, min_content_height=480, min_content_width=560,
+                                    hscrollbar_policy=Gtk.PolicyType.NEVER)
+        alert = compat.AlertDialog(heading="Compatibility guide", extra_child=scroll)
+        alert.add_response("ok", "OK")
+        alert.present(self)
 
     def on_about(self, *_):
         about = compat.AboutDialog(application_name="Proton Porter", version=__version__, application_icon=APP_ID,
@@ -1329,6 +1396,23 @@ class SettingsDialog(compat.PreferencesDialog):
         s.test_workspace = int(self.test_ws.get_value())
         s.test_seconds = int(self.test_secs.get_value())
         s.save()
+
+
+def guide_markup(text: str) -> str:
+    """The guide's small Markdown subset (# headings, - bullets, **bold**, `code`) as Pango markup."""
+    import re
+    out = []
+    for line in text.splitlines():
+        line = esc(line)
+        line = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
+        line = re.sub(r"`(.+?)`", r"<tt>\1</tt>", line)
+        if line.startswith("# "):
+            out.append(f"\n<span size='large'><b>{line[2:]}</b></span>")
+        elif line.startswith("- "):
+            out.append(f"  •  {line[2:]}")
+        else:
+            out.append(line)
+    return "\n".join(out).strip()
 
 
 def render_png(widget: Gtk.Widget, path: str) -> bool:

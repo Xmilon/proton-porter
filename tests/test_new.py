@@ -24,6 +24,10 @@ case "$FAKE" in
     printf 'err:module:import_dll Library MSVCP140.dll (which is needed by "Z:\\\\g\\\\a.exe") not found\\n' > "$log"
     exit 1 ;;
   quick) echo "fixme: fine" > "$log"; exit 0 ;;
+  loader)
+    echo "fixme: loader" > "$log"
+    python3 -c "import os; os.execvp('sleep', ['Z:/g/game.exe', '30'])" &
+    exit 1 ;;
   *)
     echo "fixme: all good" > "$log"
     exec sleep 30 ;;
@@ -247,6 +251,12 @@ class Running(core.Sandbox):
         self.assertFalse(r.survived)
         self.assertEqual(r.exit_code, 1)
         self.assertEqual(r.diagnosis.crash_module, "heatedmetal.dll")
+
+    def test_loader_that_exits_counts_its_game(self):
+        from proton_porter.runner import run_test
+        r = run_test(self.spec(fake_proton(self.tmp, "P1"), "loader"), None, seconds=5, poll=0.1)
+        self.assertTrue(r.survived)  # nvse_loader-style: the loader quit, the game ran on
+        self.assertIsNone(r.exit_code)
 
     def test_survivor_is_stopped(self):
         from proton_porter.runner import TOKEN_VAR, run_test
@@ -542,3 +552,61 @@ class OtherRunners(core.Sandbox):
         self.assertEqual(cmd[0], "wine")
         self.assertTrue(cmd[2].startswith("/DIR=Z:"))
         self.assertTrue(env["WINEPREFIX"].endswith("installer-prefix/wine"))
+
+
+class Helpers(core.Sandbox):
+    def test_launcher_entry(self):
+        from proton_porter import desktop, steam
+        user = steam.users()[0]
+        steam.write_shortcut(user, steam.Shortcut("My Game", self.exe, self.exe.parent))
+        e = steam.library(user)[0]
+        p = desktop.add(e)
+        text = p.read_text()
+        self.assertIn(f"Exec=steam steam://rungameid/{steam.rungameid(e.appid)}", text)
+        self.assertIn("Name=My Game", text)
+        self.assertTrue(desktop.exists(e.appid))
+        self.assertTrue(desktop.remove(e.appid))
+        self.assertFalse(desktop.exists(e.appid))
+
+    def test_steam_logging_options(self):
+        from proton_porter import runner, steam
+        on = runner.with_steam_logging('WINEDLLOVERRIDES="a=n;b=n,b" %command%', 7, True)
+        self.assertTrue(runner.steam_logging(on))
+        self.assertIn('WINEDLLOVERRIDES="a=n;b=n,b" %command%', on)
+        self.assertEqual(runner.with_steam_logging(on, 7, False), 'WINEDLLOVERRIDES="a=n;b=n,b" %command%')
+        with self.assertRaises(RuntimeError):
+            runner.with_steam_logging("-windowed", 7, True)
+        user = steam.users()[0]
+        appid, _ = steam.write_shortcut(user, steam.Shortcut("My Game", self.exe, self.exe.parent, "", "icon.png"))
+        self.assertTrue(steam.set_launch_options(user, appid, on))
+        e = steam.library(user)[0]
+        self.assertEqual((e.launch_options, e.icon), (on, "icon.png"))
+
+    def test_fix_it_installs_suggested_component(self):
+        from proton_porter import doctor, runner, steam
+        from proton_porter.diagnose import Diagnosis, Finding
+        user = steam.users()[0]
+        appid, _ = steam.write_shortcut(user, steam.Shortcut("My Game", self.exe, self.exe.parent))
+        steam.set_compat_tool(appid, "Proton-GE")
+        e = steam.library(user)[0]
+        calls = []
+        old = doctor._protontricks
+        doctor._protontricks = lambda a, v: calls.append(v) or True
+        try:
+            def run(spec, ws, secs, progress):
+                ok = bool(calls)
+                d = Diagnosis() if ok else Diagnosis([Finding("missing-dll", "MSVCP140.dll is missing", "MSVCP140.dll",
+                                                               "protontricks 1 vcrun2022")], crashed=True)
+                return runner.RunResult(ok, 1, None if ok else 1, None, d, "P")
+            rep = doctor.fix_it(e, user, None, 1, run=run)
+        finally:
+            doctor._protontricks = old
+        self.assertEqual(calls, ["vcrun2022"])
+        self.assertTrue(rep.fixed)
+        self.assertIn("Fixed by: Install vcrun2022 with protontricks.", rep.notes)
+
+    def test_fixes_for_graphics(self):
+        from proton_porter import doctor, runner
+        from proton_porter.diagnose import Diagnosis, Finding
+        r = runner.RunResult(False, 1, 1, None, Diagnosis([Finding("crash", "x", "d3d11.dll")], True), "P")
+        self.assertEqual(doctor.fixes_for(r)[0].env, {"PROTON_USE_WINED3D": "1"})
