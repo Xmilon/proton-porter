@@ -75,8 +75,8 @@ collections file to `~/.local/state/proton-porter/backups/<date>` first.
 ## Install
 
 ```sh
-tar xf proton-porter-1.1.1.tar.gz
-cd proton-porter-1.1.1
+tar xf proton-porter-1.2.0.tar.gz
+cd proton-porter-1.2.0
 ./install.sh            # asks before installing missing packages
 ```
 

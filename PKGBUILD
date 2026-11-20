@@ -1,6 +1,6 @@
 # Maintainer: Xmilon
 pkgname=proton-porter
-pkgver=1.1.1
+pkgver=1.2.0
 pkgrel=1
 pkgdesc="Add Windows games to Steam with Proton: loader DLLs, saves, collections sorted out"
 arch=(any)
