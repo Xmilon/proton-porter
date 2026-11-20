@@ -17,7 +17,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from . import __version__, archive, protontools, repack, retry, runner, runners, steam, uninstall, update  # noqa: E402
+from . import __version__, archive, compat, protontools, repack, retry, runner, runners, steam, uninstall, update  # noqa: E402
 from .analyze import (Analysis, DllChoice, SaveCandidate, analyze, default_search_roots,  # noqa: E402
                       overrides_string, scan_folder)
 from .apply import Choices, Job, apply_many, data_dir, describe, parse_env  # noqa: E402
@@ -169,7 +169,7 @@ class Window(Adw.ApplicationWindow):
         return self.runners.index(best) if best in self.runners else 0
 
     def error(self, heading: str, body: str) -> None:
-        alert = Adw.AlertDialog(heading=heading, body=body)
+        alert = compat.AlertDialog(heading=heading, body=body)
         alert.add_response("ok", "OK")
         alert.present(self)
 
@@ -177,7 +177,7 @@ class Window(Adw.ApplicationWindow):
         self.toasts.add_toast(Adw.Toast(title=text))
 
     def confirm(self, heading: str, body: str, action: str, callback, destructive: bool = False) -> None:
-        alert = Adw.AlertDialog(heading=heading, body=body)
+        alert = compat.AlertDialog(heading=heading, body=body)
         alert.add_response("cancel", "Cancel")
         alert.add_response("go", action)
         alert.set_response_appearance("go", Adw.ResponseAppearance.DESTRUCTIVE if destructive
@@ -505,7 +505,7 @@ class Window(Adw.ApplicationWindow):
         sub = Adw.EntryRow(title="Folder name there", text=src.name)
         box.append(place)
         box.append(sub)
-        alert = Adw.AlertDialog(heading="Where did the game keep these?",
+        alert = compat.AlertDialog(heading="Where did the game keep these?",
                                 body="On Windows, under C:\\Users\\<you>\\. PCGamingWiki lists it for most games.")
         alert.set_extra_child(box)
         alert.add_response("cancel", "Cancel")
@@ -556,7 +556,7 @@ class Window(Adw.ApplicationWindow):
             return
         label = Gtk.Label(label=describe(self.analysis, dlls, c), selectable=True, xalign=0, wrap=True)
         label.add_css_class("monospace")
-        alert = Adw.AlertDialog(heading="This is what will happen")
+        alert = compat.AlertDialog(heading="This is what will happen")
         alert.set_extra_child(label)
         alert.add_response("close", "Close")
         alert.present(self)
@@ -597,7 +597,7 @@ class Window(Adw.ApplicationWindow):
 
     def start_scan(self, folder: Path) -> None:
         wait = Adw.StatusPage(title="Looking for games…", description=esc(folder))
-        wait.set_child(Adw.Spinner(width_request=32, height_request=32))
+        wait.set_child(compat.Spinner(width_request=32, height_request=32))
         self.replace(self.scan_stack, "results", wait)
         roots = self.search_roots()
 
@@ -801,7 +801,7 @@ class Window(Adw.ApplicationWindow):
 
     def show_latest_log(self, e: steam.LibraryEntry) -> None:
         text, folder = runner.latest_report(e)
-        alert = Adw.AlertDialog(heading=f"{e.name}: latest log", body=text)
+        alert = compat.AlertDialog(heading=f"{e.name}: latest log", body=text)
         alert.add_response("copy", "Copy")
         alert.add_response("open", "Open folder")
         alert.add_response("ok", "OK")
@@ -857,7 +857,7 @@ class Window(Adw.ApplicationWindow):
                 self.error(("Still running: " if res.survived else "Stopped: ") + res.line(), body)
             self.run_task(f"Testing {e.name}",
                           lambda progress: runner.run_test(runner.spec_for(e, self.runners), ws, secs, progress), done)
-        self.confirm(f"Test {e.name}?", f"Starts the game on workspace {ws} with a Proton log, waits {secs} seconds, "
+        self.confirm(f"Test {e.name}?", f"Starts the game {runner.where(ws)} with a log, waits {secs} seconds, "
                      "stops it and reads the log.", "Start", go)
 
     def retry_game(self, e: steam.LibraryEntry) -> None:
@@ -878,7 +878,7 @@ class Window(Adw.ApplicationWindow):
             self.run_task(f"Trying other Proton versions for {e.name}",
                           lambda progress: retry.retry(e, self.user, self.protons, ws, secs, 6, True, progress), done)
         self.confirm(f"Try other Proton versions for {e.name}?",
-                     f"Starts the game on workspace {ws} with different Proton versions and a fresh Proton folder "
+                     f"Starts the game {runner.where(ws)} with different Proton versions and a fresh Proton folder "
                      f"(the old one is kept), {secs} seconds each, and keeps the first that stays up. "
                      "Steam closes and reopens when a winner is saved.", "Start", go)
 
@@ -924,7 +924,7 @@ class Window(Adw.ApplicationWindow):
                          wrap=True, xalign=0)
         note.add_css_class("dim-label")
         box.append(note)
-        alert = Adw.AlertDialog(heading=f"Uninstall {e.name}?", extra_child=box)
+        alert = compat.AlertDialog(heading=f"Uninstall {e.name}?", extra_child=box)
         alert.add_response("cancel", "Cancel")
         alert.add_response("go", "Uninstall")
         alert.set_response_appearance("go", Adw.ResponseAppearance.DESTRUCTIVE)
@@ -993,7 +993,7 @@ class Window(Adw.ApplicationWindow):
     def working_page(self) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, valign=Gtk.Align.CENTER,
                       margin_start=48, margin_end=48)
-        spinner = Adw.Spinner(width_request=48, height_request=48, halign=Gtk.Align.CENTER)
+        spinner = compat.Spinner(width_request=48, height_request=48, halign=Gtk.Align.CENTER)
         self.work_label = Gtk.Label(label="Working…", wrap=True, justify=Gtk.Justification.CENTER)
         self.work_label.add_css_class("title-3")
         self.work_bar = Gtk.ProgressBar()
@@ -1079,7 +1079,7 @@ class Window(Adw.ApplicationWindow):
         SettingsDialog(self).present(self)
 
     def on_about(self, *_):
-        about = Adw.AboutDialog(application_name="Proton Porter", version=__version__, application_icon=APP_ID,
+        about = compat.AboutDialog(application_name="Proton Porter", version=__version__, application_icon=APP_ID,
                                 developer_name=MAKER, developers=[f"{MAKER} {MAKER_URL}"],
                                 website=REPO_URL, issue_url=f"{REPO_URL}/issues", copyright=f"© 2026 {MAKER}",
                                 comments="Add Windows games to Steam with Proton: loader DLLs, saves, "
@@ -1089,7 +1089,7 @@ class Window(Adw.ApplicationWindow):
         about.present(self)
 
 
-class SettingsDialog(Adw.PreferencesDialog):
+class SettingsDialog(compat.PreferencesDialog):
     def __init__(self, win: Window):
         super().__init__(title="Settings", search_enabled=True)
         self.win = win
@@ -1126,7 +1126,10 @@ class SettingsDialog(Adw.PreferencesDialog):
         st.add(self.upd)
         general.add(st)
         tg = Adw.PreferencesGroup(title="Testing and Proton",
-                                  description="Games are only started on this workspace when testing.")
+                                  description="Games are only started on this workspace when testing."
+                                  if runner.workspace_support() else
+                                  "Tests open games on the current screen (picking a workspace needs Hyprland "
+                                  "with hypruse).")
         self.test_ws = Adw.SpinRow.new_with_range(1, 10, 1)
         self.test_ws.set_title("Test workspace")
         self.test_ws.set_value(s.test_workspace)
@@ -1373,4 +1376,8 @@ class App(Adw.Application):
 
 
 def run(argv: list[str] | None = None) -> int:
+    problem = compat.too_old()
+    if problem:
+        print(problem, file=sys.stderr)
+        return 1
     return App().run(argv if argv is not None else sys.argv[:1])

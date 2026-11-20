@@ -33,8 +33,7 @@ def _print_analysis(a) -> None:
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and not argv[0].startswith("-") and Path(argv[0]).exists():
-        from .gui import run  # `proton-porter game.exe` opens the window with it
-        return run(["proton-porter", str(Path(argv[0]).resolve())])
+        return _gui(["proton-porter", str(Path(argv[0]).resolve())])  # opens the window with it
     p = argparse.ArgumentParser(prog="proton-porter", description="Add Windows games to Steam with Proton, fixed up.")
     p.add_argument("--version", action="version", version=__version__)
     sub = p.add_subparsers(dest="cmd")
@@ -120,8 +119,7 @@ def main(argv: list[str] | None = None) -> int:
 
     a = p.parse_args(argv)
     if a.cmd is None:
-        from .gui import run
-        return run()
+        return _gui(None)
     if a.cmd == "scan":
         from .analyze import scan_folder
         for info, likely in scan_folder(a.folder, []):
@@ -187,6 +185,16 @@ def main(argv: list[str] | None = None) -> int:
     if not r.collection_ok:
         print("  Couldn't add it to the collection (Steam's collection file wasn't found).")
     return 0
+
+
+def _gui(argv: list[str] | None) -> int:
+    try:
+        from .gui import run
+    except (ImportError, ValueError) as error:  # PyGObject, GTK 4 or libadwaita missing
+        print(f"The window can't open: {error}.\nInstall PyGObject, GTK 4 and libadwaita "
+              "(./install.sh does it), or use the command line: proton-porter --help", file=sys.stderr)
+        return 1
+    return run(argv)
 
 
 def _progress(msg: str, frac: float | None) -> None:

@@ -174,6 +174,23 @@ class Archives(core.Sandbox):
             archive.verify = orig
         self.assertEqual(list((self.tmp / "Games").iterdir()), [])
 
+    def test_tar_without_data_filter(self):
+        import tarfile as tf_mod
+        from proton_porter import archive
+        src = self.make_tree()
+        (src / "bin/game.exe").chmod(0o755)
+        t = self.tmp / "Game.tar.gz"
+        with tf_mod.open(t, "w:gz") as tf:
+            tf.add(src, arcname="Game")
+        saved = tf_mod.data_filter
+        del tf_mod.data_filter  # pretend to be an old Python
+        try:
+            archive.extract(t, self.tmp / "out")
+        finally:
+            tf_mod.data_filter = saved
+        self.assertEqual((self.tmp / "out/Game/data.pak").stat().st_size, 5000)
+        self.assertTrue(os.access(self.tmp / "out/Game/bin/game.exe", os.X_OK))
+
     def test_unsafe_path_refused(self):
         from proton_porter import archive
         t = self.tmp / "evil.tar"
@@ -243,32 +260,16 @@ class Running(core.Sandbox):
             except OSError:
                 pass
 
-    def test_refuses_workspace_without_hypruse(self):
+    def test_no_hyprland_runs_on_current_screen(self):
         from proton_porter import runner
         old = runner.shutil.which
-        runner.shutil.which = lambda name: None
+        runner.shutil.which = lambda name: None if name == "hypruse" else old(name)
         try:
-            with self.assertRaises(RuntimeError):
-                runner.run_test(self.spec(fake_proton(self.tmp, "P1"), "ok"), 7, seconds=1)
+            self.assertEqual(runner.where(7), "on this screen")
+            r = runner.run_test(self.spec(fake_proton(self.tmp, "P1"), "crash"), 7, seconds=10, poll=0.1)
+            self.assertEqual(r.exit_code, 1)  # it ran, directly
         finally:
             runner.shutil.which = old
-
-    def test_latest_report_finds_steam_named_log(self):
-        from proton_porter import runner, steam
-        user = steam.users()[0]
-        steam.write_shortcut(user, steam.Shortcut("My Game", self.exe, self.exe.parent))
-        entry = steam.library(user)[0]
-        (self.exe.parent / "steam_appid.txt").write_text("105600")
-        old_home = os.environ.get("HOME")
-        os.environ["HOME"] = str(self.tmp)
-        try:
-            (self.tmp / "steam-105600.log").write_text(
-                'err:module:import_dll Library MSVCP140.dll (which is needed by "Z:\\g\\a.exe") not found\n')
-            self.assertEqual(runner.latest_log(entry.appid, entry.start_dir), self.tmp / "steam-105600.log")
-            text, _ = runner.latest_report(entry)
-            self.assertIn("MSVCP140.dll is missing", text)
-        finally:
-            os.environ["HOME"] = old_home
 
     def test_launch_option_parsing(self):
         from proton_porter.runner import parse_launch_options

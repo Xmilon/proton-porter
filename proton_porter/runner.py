@@ -141,10 +141,7 @@ def _launch(cmd: list[str], env: dict[str, str], cwd: Path, workspace: int | Non
     # Wrapper records the exit code, since `hypruse launch` doesn't hand the process back.
     script = f'echo $$ > "{pidfile}"; "$@"; echo $? > "{rcfile}"'
     inner = ["env", *[f"{k}={v}" for k, v in env.items()], "sh", "-c", script, "sh", *cmd]
-    if workspace is not None:
-        if not shutil.which("hypruse"):
-            raise RuntimeError("hypruse is not installed, so the game can't be started on a chosen workspace. "
-                               "Not starting it on the current one.")
+    if workspace is not None and workspace_support():
         res = subprocess.run(["hypruse", "launch", "--workspace", str(workspace), "--", *inner],
                              cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         # 4 = started, but no window within 8 s (first start, prefix being built): fine,
@@ -169,6 +166,19 @@ def herd_windows(appid: int, workspace: int, exe_name: str = "") -> None:
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
+
+
+def workspace_support() -> bool:
+    """Games can be started on a chosen workspace (Hyprland with hypruse). Elsewhere they open
+    on the current screen."""
+    return bool(shutil.which("hypruse")) and bool(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
+
+
+def where(workspace: int | None) -> str:
+    """Where a test run will show up, for messages."""
+    if workspace is not None and workspace_support():
+        return f"on workspace {workspace}"
+    return "on this screen"
 
 
 def state_dir() -> Path:
@@ -197,7 +207,7 @@ def run_test(spec: RunSpec, workspace: int | None, seconds: float = 60, progress
     cmd, env = build_command(spec, log_dir, token)
     pidfile, rcfile = log_dir / "pid", log_dir / "exit-code"
     cwd = spec.start_dir if spec.start_dir.is_dir() else spec.exe.parent
-    progress(f"Starting with {spec.proton.display}" + (f" on workspace {workspace}" if workspace is not None else ""), None)
+    progress(f"Starting with {spec.proton.display} {where(workspace)}", None)
     _launch(cmd, env, cwd, workspace, pidfile, rcfile)
     t0 = time.time()
     code: int | None = None
@@ -210,7 +220,7 @@ def run_test(spec: RunSpec, workspace: int | None, seconds: float = 60, progress
                     code = -1
                 break
             progress(f"Running with {spec.proton.display}", min((time.time() - t0) / seconds, 1.0))
-            if workspace is not None:
+            if workspace is not None and workspace_support():
                 herd_windows(spec.appid, workspace, spec.exe.name.lower())
             time.sleep(poll)
     finally:

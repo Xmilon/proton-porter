@@ -126,6 +126,28 @@ def verify(dest: Path, entries: list[Entry], progress: Progress = lambda *_: Non
     return problems
 
 
+def _extract_tar(tf: tarfile.TarFile, dest: Path) -> None:
+    """Safe tar extraction. Python 3.12+ (and patched 3.8-3.11) have filter="data"; older ones get
+    the same rules by hand: only plain files and folders, nothing outside dest."""
+    if hasattr(tarfile, "data_filter"):
+        tf.extractall(dest, filter="data")
+        return
+    root = dest.resolve()
+    for m in tf:
+        target = (dest / m.name).resolve()
+        if not _safe(m.name) or (target != root and root not in target.parents):
+            raise ArchiveError(f"unsafe path in archive: {m.name}")
+        if m.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif m.isreg():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            src = tf.extractfile(m)
+            with open(target, "wb") as out:
+                shutil.copyfileobj(src, out)
+            target.chmod(0o755 if m.mode & 0o111 else 0o644)
+        # links, devices and fifos are skipped, as filter="data" would refuse them
+
+
 def extract(archive: Path, dest: Path, password: str = "", progress: Progress = lambda *_: None) -> list[Entry]:
     """Unpack into `dest` (created, must be empty or new) and verify every file.
 
@@ -147,7 +169,7 @@ def extract(archive: Path, dest: Path, password: str = "", progress: Progress = 
     if is_tar(archive):
         tf, proc = _tar_open(archive)
         try:
-            tf.extractall(dest, filter="data")
+            _extract_tar(tf, dest)
         except (tarfile.TarError, OSError, EOFError) as error:
             raise ArchiveError(f"Extracting failed: {error}") from error
         finally:
