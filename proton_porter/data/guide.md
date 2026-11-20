@@ -8,7 +8,7 @@
 - **Emulator bundles:** Windows emulator packages run under Proton. A native Linux build of the same emulator is usually smoother.
 
 # Often broken
-- **OnlineFix, old style:** some builds replace `steam_api.dll` and ship `OnlineFix.dll` plus `steam_api.of` (the SteamRIP Terraria, for example). They show an error box and refuse to load under Wine and every Proton. Use another release.
+- **OnlineFix, old style:** some builds replace `steam_api.dll` and ship `OnlineFix.dll` plus `steam_api.of`. They show an error box and refuse to load under Wine and every Proton. Use another release.
 - **Kernel anti-cheat online:** BattlEye and EasyAntiCheat only work if the developer turned on Proton support. Rainbow Six Siege online doesn't.
 - **Rainbow Six Siege Y9S2 with Heated Metal:** it only runs with the Proton-R6HM build.
 - **Denuvo-protected games:** results vary, and a crack that works on Windows can still fail under Wine.

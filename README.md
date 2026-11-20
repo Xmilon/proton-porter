@@ -103,7 +103,7 @@ These were tried on a real machine. Your results can differ.
 | FitGirl and DODI repacks, installed through Proton Porter | Old-style OnlineFix that replaces `steam_api.dll` (`OnlineFix.dll` + `steam_api.of`): it refuses to load under Wine |
 | New-style OnlineFix (`OnlineFix64.dll` through `winmm.dll`), with Steam running | Kernel anti-cheat online (BattlEye, EasyAntiCheat) unless the developer enabled Proton |
 | GOG-based releases and Steam emulators (Goldberg, CODEX) | Rainbow Six Siege Y9S2 / Heated Metal on any Proton except Proton-R6HM |
-| Emulator bundles (a Switch 2 emulator package ran from Steam) | Installing .NET Framework 4 into a Proton prefix (`0x80070643`) |
+| Emulator bundles (Windows emulator packages started from Steam) | Installing .NET Framework 4 into a Proton prefix (`0x80070643`) |
 | XNA / .NET games through Proton's Mono (Terraria) | A heavily modded Fallout: New Vegas (GOG + NVSE plugins): crashes ~6 s after start, not solved yet |
 
 The full list is in the app (menu → Compatibility guide) and in
@@ -149,6 +149,21 @@ proton-porter update --check
   making a second one.
 - Games with kernel anti-cheat that hasn't been enabled for Proton won't run
   online whatever you do.
+
+## Disclaimer
+
+Proton Porter is a tool for running Windows games **you are entitled to play** on Linux. It doesn't
+include, download or point to any game, crack or copyrighted file. It can recognise modified game
+files, because people use mods and fan patches. That doesn't mean using such files is allowed where
+you live.
+
+**You are responsible for what you run with it and for following the law and each game's licence.**
+The author doesn't support piracy and isn't responsible for how the software is used. As the
+[MIT licence](LICENSE) says, it comes as is, without any warranty. That includes changes it makes to
+Steam's files: it backs them up first, but keep your own backups too.
+
+Not affiliated with Valve, Steam, GOG, or any game, repack or tool named here. Names are used only to
+describe compatibility.
 
 ## Made by
 
