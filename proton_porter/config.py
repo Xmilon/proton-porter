@@ -42,6 +42,10 @@ class Settings:
     steamgriddb_key: str = ""
     fetch_artwork: bool = True
     keep_backups: int = 20
+    test_workspace: int = 7  # games for tests only start on this workspace
+    test_seconds: int = 60
+    check_updates: bool = True
+    repack_check_md5: bool = True  # check FitGirl/DODI .bin files against their MD5 list first
 
     @classmethod
     def load(cls) -> "Settings":

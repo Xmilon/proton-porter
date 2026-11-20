@@ -1,0 +1,158 @@
+[
+  {
+    "id": "onlinefix",
+    "name": "OnlineFix",
+    "detect": [
+      "OnlineFix64.dll",
+      "OnlineFix.dll",
+      "OnlineFix.ini",
+      "OnlineFix.url"
+    ],
+    "overrides": [
+      "winmm"
+    ],
+    "notes": [
+      "OnlineFix build: Steam has to be running and logged in while you play (online play goes through Steam's Spacewar app)."
+    ],
+    "proton": "Proton-GE"
+  },
+  {
+    "id": "heated-metal",
+    "name": "Heated Metal (Rainbow Six Siege)",
+    "detect": [
+      "HeatedMetal.dll"
+    ],
+    "overrides": [],
+    "notes": [
+      "Heated Metal build: stock Proton crashes in HeatedMetal.dll. Use the Proton build from the Heated Metal Discord (install it with: proton-porter install-proton ARCHIVE)."
+    ],
+    "proton": "Proton-R6HM"
+  },
+  {
+    "id": "bepinex",
+    "name": "BepInEx",
+    "detect": [
+      "doorstop_config.ini",
+      "BepInEx"
+    ],
+    "overrides": [
+      "winhttp"
+    ],
+    "notes": [
+      "BepInEx mod loader found: its winhttp.dll override is turned on. First start generates the config and can take a while."
+    ]
+  },
+  {
+    "id": "melonloader",
+    "name": "MelonLoader",
+    "detect": [
+      "MelonLoader"
+    ],
+    "overrides": [
+      "version"
+    ],
+    "notes": [
+      "MelonLoader found: its version.dll override is turned on. First start downloads/generates assemblies and is slow."
+    ]
+  },
+  {
+    "id": "skse",
+    "name": "Skyrim Script Extender (SKSE)",
+    "detect": [
+      "skse64_loader.exe",
+      "skse_loader.exe",
+      "skse64_steam_loader.dll"
+    ],
+    "overrides": [],
+    "notes": [
+      "SKSE found: add skse64_loader.exe (not the game's .exe) as the game in Steam, or Proton starts the game without it."
+    ]
+  },
+  {
+    "id": "f4se",
+    "name": "Fallout 4 Script Extender (F4SE)",
+    "detect": [
+      "f4se_loader.exe",
+      "f4se_steam_loader.dll"
+    ],
+    "overrides": [],
+    "notes": [
+      "F4SE found: add f4se_loader.exe as the game in Steam."
+    ]
+  },
+  {
+    "id": "nvse",
+    "name": "New Vegas Script Extender (NVSE)",
+    "detect": [
+      "nvse_loader.exe"
+    ],
+    "overrides": [],
+    "notes": [
+      "NVSE found: add nvse_loader.exe as the game in Steam."
+    ]
+  },
+  {
+    "id": "asi-loader",
+    "name": "ASI loader (Ultimate ASI Loader)",
+    "detect": [
+      "scripts/*.asi",
+      "*.asi",
+      "plugins/*.asi"
+    ],
+    "overrides": [
+      "dinput8"
+    ],
+    "notes": [
+      "ASI plugins found. The loader DLL (dinput8/dsound/winmm/version/d3d9...) next to the .exe needs a native override; the detected one is turned on."
+    ]
+  },
+  {
+    "id": "reshade",
+    "name": "ReShade",
+    "detect": [
+      "ReShade.ini",
+      "reshade-shaders",
+      "ReShade64.dll",
+      "ReShade32.dll"
+    ],
+    "overrides": [],
+    "notes": [
+      "ReShade found: its dxgi/d3d9/d3d11/opengl32 DLL needs a native override (turned on automatically when detected). Under DXVK it works for D3D9-11 games."
+    ]
+  },
+  {
+    "id": "reloaded-ii",
+    "name": "Reloaded-II",
+    "detect": [
+      "Reloaded-II.exe"
+    ],
+    "overrides": [],
+    "notes": [
+      "Reloaded-II found. It is a .NET app: it needs `protontricks <appid> dotnet8` (or a recent Proton-GE) to start."
+    ]
+  },
+  {
+    "id": "codex",
+    "name": "CODEX / Steam emulator",
+    "detect": [
+      "steam_emu.ini",
+      "codex.ini"
+    ],
+    "overrides": [],
+    "notes": [
+      "Steam emulator files found. Works without Steam running; Proton-GE is the safer choice."
+    ]
+  },
+  {
+    "id": "goldberg",
+    "name": "Goldberg Steam emulator",
+    "detect": [
+      "steam_settings/*",
+      "local_save.txt"
+    ],
+    "overrides": [],
+    "notes": [
+      "Goldberg emulator found. Saves may live next to the game (local_save.txt) or under C:\\users\\steamuser\\AppData\\Roaming\\Goldberg SteamEmu Saves."
+    ]
+  }
+]

@@ -91,6 +91,7 @@ class Analysis:
     unity_ids: tuple[str, str] | None = None  # (company, product)
     bat_needs_copy: bool = False
     other_exes: list[Path] = field(default_factory=list)
+    mods: list = field(default_factory=list)  # knowledge.KnownMod
 
 
 def game_root(exe: Path) -> Path:
@@ -334,8 +335,18 @@ def analyze(exe: Path, search_roots: list[Path] | None = None) -> Analysis:
     # Notes and known trouble.
     names = {p.name.lower() for p in here.iterdir()} if here.is_dir() else set()
     root_names = {p.name.lower() for p in root.iterdir()} if root.is_dir() else set()
-    if "doorstop_config.ini" in names or "bepinex" in names:
-        a.notes.append("BepInEx mod loader found" + (": its winhttp.dll override is turned on." if "winhttp.dll" in names else "."))
+    from . import knowledge
+    for mod in knowledge.detect(here, root):
+        a.mods.append(mod)
+        for note in mod.notes:
+            if note not in a.notes:
+                a.notes.append(note)
+        for dll in mod.overrides:
+            choice = next((d for d in a.dlls if d.name == dll), None)
+            if choice:
+                choice.enabled = True
+            else:
+                a.dlls.append(DllChoice(dll, mod.name, True))
     if {"easyanticheat", "easyanticheat_eos"} & (names | root_names):
         a.warnings.append("EasyAntiCheat found. Online play only works if the developer enabled Proton support.")
     if "battleye" in names | root_names:
@@ -348,9 +359,6 @@ def analyze(exe: Path, search_roots: list[Path] | None = None) -> Analysis:
         a.notes.append("XNA game: if it won't start, run: protontricks <appid> xna40")
     elif a.engine == ".NET":
         a.notes.append(".NET game: Proton's Wine Mono usually works; if not, run: protontricks <appid> dotnet48")
-    if "onlinefix64.dll" in names or "onlinefix.ini" in names:
-        a.notes.append("OnlineFix build: Steam has to be running and logged in while you play "
-                       "(it goes through Steam's Spacewar app for online play).")
     if "galaxy.dll" in names or "galaxy64.dll" in names:
         a.notes.append("GOG build (Galaxy DLL present).")
     if "steam_api.dll" in names or "steam_api64.dll" in names:

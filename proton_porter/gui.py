@@ -17,7 +17,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from . import __version__, steam  # noqa: E402
+from . import __version__, archive, protontools, repack, retry, runner, steam, uninstall, update  # noqa: E402
 from .analyze import (Analysis, DllChoice, SaveCandidate, analyze, default_search_roots,  # noqa: E402
                       overrides_string, scan_folder)
 from .apply import Choices, Job, apply_many, data_dir, describe, parse_env  # noqa: E402
@@ -107,6 +107,7 @@ class Window(Adw.ApplicationWindow):
         self.tabs = Adw.ViewStack()
         header.set_title_widget(Adw.ViewSwitcher(stack=self.tabs, policy=Adw.ViewSwitcherPolicy.WIDE))
         menu = Gio.Menu()
+        menu.append("Check for updates", "win.update")
         menu.append("Settings", "win.settings")
         menu.append(f"{MAKER} on GitHub", "win.github")
         menu.append("About Proton Porter", "win.about")
@@ -114,6 +115,7 @@ class Window(Adw.ApplicationWindow):
         view.add_top_bar(header)
         view.set_content(self.tabs)
         for name, cb in (("settings", self.on_settings), ("about", self.on_about),
+                         ("update", lambda *_: self.check_update(True)),
                          ("github", lambda *_: open_uri(MAKER_URL))):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", cb)
@@ -140,6 +142,8 @@ class Window(Adw.ApplicationWindow):
         drop.connect("drop", self.on_drop)
         self.add_controller(drop)
 
+        if self.settings.check_updates:
+            GLib.timeout_add_seconds(3, lambda: self.check_update(False) or False)
         if not self.protons:
             self.error("No Proton found", "Install Proton from Steam first: Library > search “Proton” > Install.")
         elif not self.users:
@@ -197,16 +201,107 @@ class Window(Adw.ApplicationWindow):
         btn.add_css_class("pill")
         btn.connect("clicked", self.on_choose)
         box.append(btn)
+        arc = Gtk.Button(label="Install from archive (.rar, .7z, .zip)…", halign=Gtk.Align.CENTER)
+        arc.add_css_class("pill")
+        arc.connect("clicked", self.on_choose_archive)
+        box.append(arc)
+        rpk = Gtk.Button(label="Install a repack (FitGirl, DODI)…", halign=Gtk.Align.CENTER)
+        rpk.add_css_class("pill")
+        rpk.connect("clicked", self.on_choose_repack)
+        box.append(rpk)
         box.append(maker_button())
         page.set_child(box)
         return page
 
-    def on_choose(self, *_):
-        dialog = Gtk.FileDialog(title="Choose the game's .exe")
+    def on_choose_repack(self, *_):
+        dialog = Gtk.FileDialog(title="Choose the repack's folder (the one with setup.exe)")
+        start = Path.home() / "Downloads"
+        if start.is_dir():
+            dialog.set_initial_folder(Gio.File.new_for_path(str(start)))
+
+        def done(dlg, res):
+            try:
+                folder = Path(dlg.select_folder_finish(res).get_path())
+            except GLib.Error:
+                return
+            rp = repack.detect(folder)
+            if rp:
+                self.install_repack(rp)
+            else:
+                self.error("Not a repack", f"{folder.name} has no setup.exe with .bin files next to it.")
+        dialog.select_folder(self, None, done)
+
+    def on_choose_archive(self, *_):
+        dialog = Gtk.FileDialog(title="Choose the game's archive")
         filters = Gio.ListStore.new(Gtk.FileFilter)
-        f = Gtk.FileFilter(name="Windows programs (.exe, .bat)")
+        f = Gtk.FileFilter(name="Archives")
+        for suffix in archive.ARCHIVE_SUFFIXES:
+            f.add_suffix(suffix.lstrip("."))
+        filters.append(f)
+        dialog.set_filters(filters)
+        dialog.open(self, None, self._archive_chosen)
+
+    def _archive_chosen(self, dialog, result):
+        try:
+            path = Path(dialog.open_finish(result).get_path())
+        except GLib.Error:
+            return
+        self.install_archive(path)
+
+    def install_repack(self, rp: "repack.Repack") -> None:
+        games = Path(self.settings.games_dir).expanduser()
+        tool = next((t for t in self.protons if t.internal == self.settings.proton), None) \
+            or steam.default_proton(self.protons)
+        if tool is None:
+            self.error("No Proton found", "Install Proton from Steam first.")
+            return
+
+        def go():
+            def done(res):
+                if isinstance(res, Exception):
+                    self.error(f"Couldn't install {rp.name}", str(res))
+                    return
+                from .analyze import best_exe
+                exe = best_exe(res)
+                if exe:
+                    self.toast(f"Installed {rp.name}")
+                    self.load(exe)
+                else:
+                    self.error("No game found", f"The installer put files in {res}, but no game .exe was found.")
+            self.run_task(f"Installing {rp.name}",
+                          lambda progress: repack.install(rp, games, tool, progress, self.settings.repack_check_md5), done)
+        self.confirm(f"Install the {rp.kind} repack “{rp.name}”?",
+                     ("Its files are checked against its MD5 list first. " if rp.md5_file else "")
+                     + f"Then its installer opens: click through it. The install folder is preset to "
+                     f"{games / rp.name}; keep it, so Proton Porter can find the game afterwards. "
+                     "Untick DirectX / Visual C++ extras: Proton has its own.", "Install", go)
+
+    def install_archive(self, path: Path) -> None:
+        """Extract into <games folder>/<game>, verify, then open the Add form for it."""
+        games = Path(self.settings.games_dir).expanduser()
+
+        def done(res):
+            if isinstance(res, Exception):
+                self.error("Couldn't install the archive", str(res))
+                return
+            from .analyze import best_exe
+            exe = best_exe(res)
+            self.toast(f"Extracted and verified {res.name}")
+            if exe:
+                self.load(exe)
+            else:
+                self.error("No game found", f"{res} was extracted, but no game .exe was found in it.")
+        self.run_task(f"Extracting {path.name}",
+                      lambda progress: archive.install_game_archive(path, games, progress), done)
+
+    def on_choose(self, *_):
+        dialog = Gtk.FileDialog(title="Choose the game's .exe or archive")
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        f = Gtk.FileFilter(name="Games (.exe, .bat, a repack's setup.exe, or an archive: .zip .rar .7z .tar.*)")
         for pattern in ("*.exe", "*.EXE", "*.bat", "*.BAT", "*.cmd"):
             f.add_pattern(pattern)
+        for suffix in archive.ARCHIVE_SUFFIXES:
+            f.add_suffix(suffix.lstrip("."))
         filters.append(f)
         dialog.set_filters(filters)
         start = next((p for p in (Path("~/Old Windows").expanduser(), Path(self.settings.games_dir), Path.home())
@@ -226,7 +321,9 @@ class Window(Adw.ApplicationWindow):
         if not files:
             return False
         path = Path(files[0].get_path())
-        if path.is_dir():
+        if path.is_dir() and repack.detect(path):
+            self.load(path)
+        elif path.is_dir():
             self.tabs.set_visible_child_name("scan")
             self.start_scan(path)
         else:
@@ -234,6 +331,14 @@ class Window(Adw.ApplicationWindow):
         return True
 
     def load(self, exe: Path, analysis: Analysis | None = None) -> None:
+        if analysis is None and (exe.is_dir() or exe.name.lower() == "setup.exe"):
+            rp = repack.detect(exe)
+            if rp:
+                self.install_repack(rp)
+                return
+        if archive.is_archive(exe):
+            self.install_archive(exe)
+            return
         try:
             self.analysis = analysis or analyze(exe, self.search_roots())
         except Exception as error:  # noqa: BLE001
@@ -585,6 +690,11 @@ class Window(Adw.ApplicationWindow):
             icon = Path(e.icon) if e.icon else data_dir() / "icons" / f"{e.appid}.png"
             if icon.suffix.lower() in (".png", ".jpg", ".jpeg", ".ico", ".svg") and icon.is_file():
                 row.add_prefix(Gtk.Image(file=str(icon), pixel_size=32))
+            play = Gtk.Button(icon_name="media-playback-start-symbolic", valign=Gtk.Align.CENTER,
+                              tooltip_text="Play", sensitive=e.exe.is_file())
+            play.add_css_class("flat")
+            play.connect("clicked", lambda _b, e=e: self.play_game(e))
+            row.add_suffix(play)
             row.add_row(Adw.ActionRow(title="Program", subtitle=esc(e.exe), subtitle_selectable=True))
             if e.launch_options:
                 row.add_row(Adw.ActionRow(title="Launch options", subtitle=esc(e.launch_options),
@@ -594,11 +704,16 @@ class Window(Adw.ApplicationWindow):
                                   margin_start=12, margin_end=12)
             prefix = steam.prefix_dir(e.appid)
             for label, cb, css, ok in (
+                ("Play", lambda e=e: self.play_game(e), "suggested-action", e.exe.is_file()),
+                ("Latest log", lambda e=e: self.show_latest_log(e), None, True),
                 ("Game folder", lambda e=e: open_path(e.start_dir), None, e.start_dir.is_dir()),
                 ("Proton folder", lambda p=prefix: open_path(p / "pfx/drive_c"), None, (prefix / "pfx/drive_c").is_dir()),
+                ("Test & diagnose", lambda e=e: self.test_game(e), None, e.exe.is_file()),
+                ("Try other Protons", lambda e=e: self.retry_game(e), None, e.exe.is_file()),
                 ("Protontricks", lambda e=e: self.protontricks(e), None, tool_installed("protontricks")),
                 ("Reset Proton folder", lambda e=e: self.reset_prefix(e), None, prefix.is_dir()),
-                ("Remove from Steam", lambda e=e: self.remove_game(e), "destructive-action", True),
+                ("Remove from Steam", lambda e=e: self.remove_game(e), None, True),
+                ("Uninstall…", lambda e=e: self.uninstall_game(e), "destructive-action", True),
             ):
                 b = Gtk.Button(label=label, sensitive=ok)
                 if css:
@@ -613,6 +728,144 @@ class Window(Adw.ApplicationWindow):
             group.add(Adw.ActionRow(title="No non-Steam games yet"))
         page.add(group)
         self.replace(self.library_stack, "list", page)
+
+    def check_update(self, manual: bool) -> None:
+        """Ask GitHub's main branch for a newer version; on yes, download and install it."""
+        def work():
+            try:
+                newer, err = update.check(), None
+            except Exception as error:  # noqa: BLE001
+                newer, err = None, str(error)
+
+            def ui():
+                if err:
+                    manual and self.error("Couldn't check for updates", err)
+                elif newer:
+                    self.confirm(f"Version {newer} is available", f"You have {__version__}. Download it from GitHub "
+                                 "and install it now? Restart Proton Porter afterwards.", "Update", self.do_update)
+                elif manual:
+                    self.toast(f"Proton Porter {__version__} is up to date")
+                return False
+            GLib.idle_add(ui)
+        threading.Thread(target=work, daemon=True).start()
+
+    def do_update(self) -> None:
+        def done(res):
+            if isinstance(res, Exception):
+                self.error("Update failed", str(res))
+            elif res:
+                self.error(f"Updated to {res}", "Close and reopen Proton Porter to use it.")
+            else:
+                self.toast("Already up to date")
+        self.run_task("Updating Proton Porter", lambda progress: update.update(progress), done)
+
+    def play_game(self, e: steam.LibraryEntry) -> None:
+        """Run the game with a Proton log; if it crashes the log is kept and shown."""
+        try:
+            spec = runner.spec_for(e, self.protons)
+        except RuntimeError as err:
+            self.error("Can't start", str(err))
+            return
+        self.toast(f"Starting {e.name}")
+
+        def work():
+            try:
+                res = runner.play(spec)
+            except Exception as err:  # noqa: BLE001
+                res = err
+
+            def ui():
+                if isinstance(res, Exception):
+                    self.error(f"Couldn't start {e.name}", str(res))
+                elif not res.survived:
+                    self.error(f"{e.name} crashed", "\n".join(res.diagnosis.summary())
+                               + f"\n\nExit code {res.exit_code}. Log saved:\n{res.log}")
+                return False
+            GLib.idle_add(ui)
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_latest_log(self, e: steam.LibraryEntry) -> None:
+        text, folder = runner.latest_report(e)
+        alert = Adw.AlertDialog(heading=f"{e.name}: latest log", body=text)
+        alert.add_response("copy", "Copy")
+        alert.add_response("open", "Open folder")
+        alert.add_response("ok", "OK")
+        alert.set_default_response("ok")
+
+        def respond(_a, r):
+            if r == "copy":
+                self.get_clipboard().set(text)
+                self.toast("Copied")
+            elif r == "open" and folder:
+                open_path(folder)
+        alert.connect("response", respond)
+        alert.present(self)
+
+    def run_task(self, label: str, fn, done) -> None:
+        """Run fn(progress) off the UI thread behind the progress page; done(result or Exception) runs after."""
+        self.root.set_visible_child_name("working")
+        self.work_label.set_label(label)
+        self.work_bar.set_fraction(0)
+
+        def progress(msg, frac):
+            def ui():
+                self.work_label.set_label(msg)
+                if frac is None:
+                    self.work_bar.pulse()
+                else:
+                    self.work_bar.set_fraction(frac)
+                return False
+            GLib.idle_add(ui)
+
+        def work():
+            try:
+                res = fn(progress)
+            except Exception as err:  # noqa: BLE001
+                res = err
+
+            def ui():
+                self.root.set_visible_child_name("main")
+                done(res)
+                return False
+            GLib.idle_add(ui)
+        threading.Thread(target=work, daemon=True).start()
+
+    def test_game(self, e: steam.LibraryEntry) -> None:
+        ws, secs = self.settings.test_workspace, self.settings.test_seconds
+
+        def go():
+            def done(res):
+                if isinstance(res, Exception):
+                    self.error("Test didn't run", str(res))
+                    return
+                body = "\n".join(res.diagnosis.summary()) + (f"\n\nLog: {res.log}" if res.log else "")
+                self.error(("Still running: " if res.survived else "Stopped: ") + res.line(), body)
+            self.run_task(f"Testing {e.name}",
+                          lambda progress: runner.run_test(runner.spec_for(e, self.protons), ws, secs, progress), done)
+        self.confirm(f"Test {e.name}?", f"Starts the game on workspace {ws} with a Proton log, waits {secs} seconds, "
+                     "stops it and reads the log.", "Start", go)
+
+    def retry_game(self, e: steam.LibraryEntry) -> None:
+        ws, secs = self.settings.test_workspace, self.settings.test_seconds
+
+        def go():
+            def done(rep):
+                if isinstance(rep, Exception):
+                    self.error("Auto-fix didn't run", str(rep))
+                    return
+                lines = [("✓ " if a.result.survived else "✗ ") + a.result.line()
+                         + (" (fresh prefix)" if a.fresh_prefix else "") for a in rep.attempts]
+                if rep.winner:
+                    lines.append(f"\nKept: {rep.winner.proton.display}.")
+                lines += rep.notes
+                self.error("Found a setup that works" if rep.winner else "Nothing survived", "\n".join(lines))
+                self.refresh_library()
+            self.run_task(f"Trying other Proton versions for {e.name}",
+                          lambda progress: retry.retry(e, self.user, self.protons, ws, secs, 6, True, progress), done)
+        self.confirm(f"Try other Proton versions for {e.name}?",
+                     f"Starts the game on workspace {ws} with different Proton versions and a fresh Proton folder "
+                     f"(the old one is kept), {secs} seconds each, and keeps the first that stays up. "
+                     "Steam closes and reopens when a winner is saved.", "Start", go)
 
     def protontricks(self, e: steam.LibraryEntry) -> None:
         if not steam.prefix_dir(e.appid).is_dir():
@@ -630,6 +883,44 @@ class Window(Adw.ApplicationWindow):
                      "Deletes its Windows folder (settings, protontricks installs, and any saves kept there). "
                      "Proton makes a fresh one on the next start. The game itself isn't touched.",
                      "Reset", go, destructive=True)
+
+    def uninstall_game(self, e: steam.LibraryEntry) -> None:
+        """Run the game's uninstaller or move its folder to the Trash, then remove it from Steam."""
+        plan = uninstall.make_plan(e, Path(self.settings.games_dir).expanduser(), steam.library(self.user))
+        prefix_check = Gtk.CheckButton(label="Also move its Proton folder to the Trash (it may hold saves)",
+                                       sensitive=plan.prefix is not None)
+        body = Gtk.Label(label=plan.describe(False), wrap=True, xalign=0)
+        prefix_check.connect("toggled", lambda c: body.set_label(plan.describe(c.get_active())))
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.append(body)
+        box.append(prefix_check)
+        note = Gtk.Label(label="Files go to the Trash, so you can restore them. Steam restarts for a moment.",
+                         wrap=True, xalign=0)
+        note.add_css_class("dim-label")
+        box.append(note)
+        alert = Adw.AlertDialog(heading=f"Uninstall {e.name}?", extra_child=box)
+        alert.add_response("cancel", "Cancel")
+        alert.add_response("go", "Uninstall")
+        alert.set_response_appearance("go", Adw.ResponseAppearance.DESTRUCTIVE)
+        alert.set_default_response("cancel")
+        tool = next((t for t in self.protons if t.internal == e.tool), None) or steam.default_proton(self.protons)
+
+        def respond(_a, r):
+            if r != "go":
+                return
+            remove_prefix = prefix_check.get_active()
+
+            def done(res):
+                if isinstance(res, Exception):
+                    self.error(f"Couldn't uninstall {e.name}", str(res))
+                    return
+                self.run_steam_task(f"Removing {e.name} from Steam",
+                                    lambda: steam.remove_shortcut(self.user, e.appid),
+                                    f"Uninstalled {e.name}. " + " ".join(res))
+            self.run_task(f"Uninstalling {e.name}",
+                          lambda progress: uninstall.execute(plan, tool, remove_prefix, progress), done)
+        alert.connect("response", respond)
+        alert.present(self)
 
     def remove_game(self, e: steam.LibraryEntry) -> None:
         self.confirm(f"Remove {e.name} from Steam?",
@@ -803,7 +1094,38 @@ class SettingsDialog(Adw.PreferencesDialog):
         st = Adw.PreferencesGroup(title="Steam")
         self.reopen = Adw.SwitchRow(title="Reopen Steam afterwards", active=s.reopen_steam)
         st.add(self.reopen)
+        self.upd = Adw.SwitchRow(title="Check for updates at start", subtitle="Looks at GitHub's main branch",
+                                 active=s.check_updates)
+        st.add(self.upd)
         general.add(st)
+        tg = Adw.PreferencesGroup(title="Testing and Proton",
+                                  description="Games are only started on this workspace when testing.")
+        self.test_ws = Adw.SpinRow.new_with_range(1, 10, 1)
+        self.test_ws.set_title("Test workspace")
+        self.test_ws.set_value(s.test_workspace)
+        tg.add(self.test_ws)
+        self.test_secs = Adw.SpinRow.new_with_range(10, 300, 5)
+        self.test_secs.set_title("Seconds a game must stay up")
+        self.test_secs.set_value(s.test_seconds)
+        tg.add(self.test_secs)
+        inst = Adw.ActionRow(title="Install a custom Proton", subtitle="From a .tar.gz / .tar.xz / .tar.zst / .7z / .zip")
+        ib = Gtk.Button(label="Choose archive…", valign=Gtk.Align.CENTER)
+        ib.connect("clicked", self.pick_proton_archive)
+        inst.add_suffix(ib)
+        tg.add(inst)
+        general.add(tg)
+        rg2 = Adw.PreferencesGroup(title="Repacks (FitGirl, DODI)",
+                                   description="Their installer runs under Proton with the install folder set to the games folder.")
+        self.repack_md5 = Adw.SwitchRow(title="Check files before installing",
+                                        subtitle="Compares the .bin files with the repack's MD5 list",
+                                        active=s.repack_check_md5)
+        rg2.add(self.repack_md5)
+        rrow = Adw.ActionRow(title="Install a repack", subtitle="Choose the folder with setup.exe")
+        rbtn = Gtk.Button(label="Choose folder…", valign=Gtk.Align.CENTER)
+        rbtn.connect("clicked", lambda *_: (self.close(), win.on_choose_repack()))
+        rrow.add_suffix(rbtn)
+        rg2.add(rrow)
+        general.add(rg2)
         made = Adw.PreferencesGroup()
         made.add(maker_button())
         general.add(made)
@@ -902,6 +1224,28 @@ class SettingsDialog(Adw.PreferencesDialog):
                 self.add_search_row(path)
         dialog.select_folder(self.win, None, done)
 
+    def pick_proton_archive(self, *_):
+        dialog = Gtk.FileDialog(title="Choose a Proton archive")
+
+        def done(dlg, res):
+            try:
+                path = Path(dlg.open_finish(res).get_path())
+            except GLib.Error:
+                return
+            self.close()
+
+            def finished(result):
+                if isinstance(result, Exception):
+                    self.win.error("Couldn't install Proton", str(result))
+                    return
+                self.win.protons = steam.protons()
+                self.win.error(f"Installed {result.display}",
+                               "Restart Steam so it lists the new version. Then pick it for a game in Settings or "
+                               "with “Try other Protons”.")
+            self.win.run_task(f"Installing {path.name}",
+                              lambda progress: protontools.install_proton(path, progress), finished)
+        dialog.open(self.win, None, done)
+
     def pick_games_dir(self, *_):
         dialog = Gtk.FileDialog(title="Games folder")
         dialog.set_initial_folder(Gio.File.new_for_path(self.win.settings.games_dir))
@@ -932,6 +1276,8 @@ class SettingsDialog(Adw.PreferencesDialog):
         s.collection = self.collection.get_text().strip()
         s.import_saves = self.saves.get_active()
         s.reopen_steam = self.reopen.get_active()
+        s.check_updates = self.upd.get_active()
+        s.repack_check_md5 = self.repack_md5.get_active()
         s.overlay = self.overlay.get_active()
         s.mangohud = self.mango.get_active()
         s.gamemode = self.gamemode.get_active()
@@ -944,6 +1290,8 @@ class SettingsDialog(Adw.PreferencesDialog):
         s.steamgriddb_key = self.key.get_text().strip()
         s.fetch_artwork = self.fetch.get_active()
         s.keep_backups = int(self.keep.get_value())
+        s.test_workspace = int(self.test_ws.get_value())
+        s.test_seconds = int(self.test_secs.get_value())
         s.save()
 
 

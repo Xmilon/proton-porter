@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 import sys
 from pathlib import Path
 
@@ -67,6 +68,51 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("list", help="list non-Steam games in the library")
 
     sub.add_parser("protons", help="list Proton versions Steam can use")
+    sub.add_parser("mods", help="list the known cracks/mods and what each needs")
+
+    dg = sub.add_parser("diagnose", help="read a Proton log: crash module, missing DLL, likely fix")
+    dg.add_argument("target", help="a log file, or a game (name or appid) to read its latest log")
+
+    ts = sub.add_parser("test", help="start a library game with PROTON_LOG=1, then diagnose the log")
+    ts.add_argument("game", help="name or appid")
+    ts.add_argument("--workspace", type=int, help="Hyprland workspace to start it on (default: settings, 7)")
+    ts.add_argument("--seconds", type=int, help="how long it has to stay up (default: settings, 60)")
+
+    rt = sub.add_parser("retry", help="try other Proton versions and a fresh prefix; keep what survives")
+    rt.add_argument("game", help="name or appid")
+    rt.add_argument("--workspace", type=int)
+    rt.add_argument("--seconds", type=int)
+    rt.add_argument("--limit", type=int, default=6, help="most attempts")
+    rt.add_argument("--no-keep", action="store_true", help="only report, change nothing in Steam")
+
+    ia = sub.add_parser("install-archive", help="extract a .rar/.7z/.zip/.tar.* game, verify it, optionally add it")
+    ia.add_argument("archive", type=Path)
+    ia.add_argument("--to", type=Path, help="games folder (default: settings)")
+    ia.add_argument("--password", default="")
+    ia.add_argument("--add", action="store_true", help="then add it to Steam")
+
+    up = sub.add_parser("update", help="check GitHub main for a newer version and install it")
+    up.add_argument("--check", action="store_true", help="only report")
+
+    lg = sub.add_parser("logs", help="show the newest log for a game and what it says")
+    lg.add_argument("game", help="name or appid")
+
+    pl = sub.add_parser("play", help="run a library game with a Proton log; the log is kept if it crashes")
+    pl.add_argument("game", help="name or appid")
+
+    rp = sub.add_parser("install-repack", help="install a FitGirl/DODI repack folder (checks its MD5 list, runs its setup)")
+    rp.add_argument("folder", type=Path)
+    rp.add_argument("--to", type=Path, help="games folder (default: settings)")
+    rp.add_argument("--no-check", action="store_true", help="skip the MD5 check")
+    rp.add_argument("--add", action="store_true", help="then add it to Steam")
+
+    un = sub.add_parser("uninstall", help="uninstall a library game (shows the plan; --yes to do it)")
+    un.add_argument("game", help="name or appid")
+    un.add_argument("--remove-prefix", action="store_true", help="also move its Proton folder to the Trash")
+    un.add_argument("--yes", action="store_true", help="really do it")
+
+    ip = sub.add_parser("install-proton", help="install a custom Proton from an archive")
+    ip.add_argument("archive", type=Path)
 
     a = p.parse_args(argv)
     if a.cmd is None:
@@ -81,6 +127,8 @@ def main(argv: list[str] | None = None) -> int:
         for e in steam.library(steam.users()[0]):
             print(f"{e.appid:<11} {e.name:30} {e.tool or '-':20} {e.exe}")
         return 0
+    if a.cmd in ("mods", "diagnose", "test", "retry", "install-archive", "install-proton", "update", "play", "logs", "install-repack", "uninstall"):
+        return _extra(a)
     if a.cmd == "protons":
         for t in steam.protons():
             print(f"{t.internal:24} {t.display:24} {t.path}")
@@ -127,6 +175,150 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {n}")
     if not r.collection_ok:
         print("  Couldn't add it to the collection (Steam's collection file wasn't found).")
+    return 0
+
+
+def _progress(msg: str, frac: float | None) -> None:
+    print(f"  {msg}" + (f" {frac:.0%}" if frac else ""), flush=True)
+
+
+def _extra(a) -> int:
+    from . import archive, diagnose, knowledge, protontools, retry, runner, update
+    s = Settings.load()
+    try:
+        if a.cmd == "update":
+            if a.check:
+                newer = update.check()
+                print(f"Update available: {newer} (you have {__version__})" if newer else f"Up to date ({__version__})")
+                return 0
+            new = update.update(_progress)
+            print(f"Updated to {new}. Restart Proton Porter." if new else f"Up to date ({__version__})")
+            return 0
+        if a.cmd == "mods":
+            for e in knowledge.load():
+                print(f"{e['name']}\n  finds: {', '.join(e.get('detect', []))}")
+                if e.get("overrides"):
+                    print(f"  DLL overrides: {', '.join(e['overrides'])}")
+                if e.get("proton"):
+                    print(f"  Proton: {e['proton']}")
+                for n in e.get("notes", []):
+                    print(f"  {n}")
+            return 0
+        if a.cmd == "install-proton":
+            t = protontools.install_proton(a.archive, _progress)
+            print(f"Installed {t.display} ({t.internal}) in {t.path.parent}. Restart Steam to list it.")
+            return 0
+        if a.cmd == "install-repack":
+            from . import repack
+            r = repack.detect(a.folder)
+            if r is None:
+                print("That doesn't look like a repack (no setup.exe with .bin files).", file=sys.stderr)
+                return 1
+            tool = next((t for t in steam.protons() if t.internal == s.proton), None) or steam.default_proton(steam.protons())
+            if tool is None:
+                print("No Proton found.", file=sys.stderr)
+                return 1
+            print(f"{r.kind} repack: {r.name}")
+            folder = repack.install(r, a.to or Path(s.games_dir).expanduser(), tool, _progress,
+                                    s.repack_check_md5 and not a.no_check)
+            print(f"Installed in {folder}")
+            if a.add:
+                from .analyze import best_exe
+                exe = best_exe(folder)
+                return main(["add", str(exe)]) if exe else 1
+            return 0
+        if a.cmd == "install-archive":
+            folder = archive.install_game_archive(a.archive, a.to or Path(s.games_dir).expanduser(),
+                                                  _progress, a.password)
+            print(f"Extracted and verified: {folder}")
+            if a.add:
+                from .analyze import best_exe
+                exe = best_exe(folder)
+                if exe is None:
+                    print("No game .exe found to add.", file=sys.stderr)
+                    return 1
+                return main(["add", str(exe)])
+            return 0
+        users = steam.users()
+        if not users:
+            print("No Steam user found. Log in to Steam once first.", file=sys.stderr)
+            return 1
+        if a.cmd == "diagnose":
+            target = Path(a.target)
+            appid: int | str = "<appid>"
+            if not target.is_file():
+                e = runner.find_entry(users[0], a.target)
+                appid, target = e.appid, runner.latest_log(e.appid)
+                if target is None:
+                    print(f"No log for {e.name}. Run: proton-porter test {a.target}", file=sys.stderr)
+                    return 1
+            print(f"Log: {target}")
+            for line in diagnose.parse_file(target, appid).summary():
+                print(f"  {line}")
+            return 0
+        entry = runner.find_entry(users[0], a.game)
+        tools = steam.protons()
+        workspace = getattr(a, "workspace", None)
+        workspace = workspace if workspace is not None else s.test_workspace
+        seconds = getattr(a, "seconds", None) or s.test_seconds
+        if a.cmd == "test":
+            r = runner.run_test(runner.spec_for(entry, tools), workspace, seconds, _progress)
+            print(r.line())
+            print(f"Log: {r.log}")
+            for line in r.diagnosis.summary():
+                print(f"  {line}")
+            return 0 if r.survived else 2
+        if a.cmd == "uninstall":
+            from . import uninstall
+            plan = uninstall.make_plan(entry, Path(s.games_dir).expanduser(), steam.library(users[0]))
+            print(f"Uninstall {entry.name}:")
+            print(plan.describe(a.remove_prefix))
+            if not a.yes:
+                print("\nNothing done. Add --yes to do it.")
+                return 0
+            tool = next((t for t in tools if t.internal == entry.tool), None) or steam.default_proton(tools)
+            for n in uninstall.execute(plan, tool, a.remove_prefix, _progress):
+                print(n)
+            was = steam.steam_running()
+            if was:
+                steam.close_steam()
+            try:
+                steam.backup(users[0], time.strftime("%Y%m%d-%H%M%S"))
+                steam.remove_shortcut(users[0], entry.appid)
+            finally:
+                if was:
+                    steam.open_steam()
+            print("Removed from Steam.")
+            return 0
+        if a.cmd == "logs":
+            text, _folder = runner.latest_report(entry)
+            print(text)
+            return 0
+        if a.cmd == "play":
+            r = runner.play(runner.spec_for(entry, tools))
+            if r.survived:
+                print("Closed normally.")
+                return 0
+            print(f"{entry.name} crashed or failed (exit code {r.exit_code}). Log saved: {r.log}")
+            for line in r.diagnosis.summary():
+                print(f"  {line}")
+            return 2
+        if a.cmd == "retry":
+            rep = retry.retry(entry, users[0], tools, workspace, seconds, a.limit, not a.no_keep, _progress)
+            for att in rep.attempts:
+                r = att.result
+                print(f"{'OK  ' if r.survived else 'FAIL'} {r.line()}" + (" (fresh prefix)" if att.fresh_prefix else ""))
+                if not r.survived:
+                    for line in r.diagnosis.summary()[:2]:
+                        print(f"       {line}")
+            for n in rep.notes:
+                print(n)
+            if rep.winner:
+                print(f"Winner: {rep.winner.proton.display}" + (" (saved to Steam)" if rep.kept else " (not saved)"))
+            return 0 if rep.winner else 2
+    except (archive.ArchiveError, LookupError, RuntimeError, FileNotFoundError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
     return 0
 
 
