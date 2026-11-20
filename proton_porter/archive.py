@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import zipfile
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,11 +37,17 @@ def is_tar(path: Path) -> bool:
     return path.name.lower().endswith(TAR_SUFFIXES)
 
 
+def _plain_zip(path: Path) -> bool:
+    """A .zip, and no 7-Zip to read it: Python's zipfile does it then."""
+    return path.name.lower().endswith(".zip") and not any(
+        shutil.which(n) for n in ("7z", "7zz", "7za", "7zr"))
+
+
 def _seven_zip() -> str:
     for name in ("7z", "7zz", "7za", "7zr"):
         if shutil.which(name):
             return name
-    raise ArchiveError("7-Zip isn't installed (pacman -S 7zip), so .rar/.7z/.zip can't be unpacked")
+    raise ArchiveError("7-Zip isn't installed (package 7zip or p7zip), so .rar/.7z/.zip can't be unpacked")
 
 
 def _tar_open(path: Path):
@@ -75,6 +82,12 @@ def list_entries(path: Path) -> list[Entry]:
                 proc.kill()
                 proc.wait()
         return out
+    if _plain_zip(path):
+        try:
+            with zipfile.ZipFile(path) as zf:
+                return [Entry(i.filename.rstrip("/"), i.file_size, i.CRC) for i in zf.infolist() if not i.is_dir()]
+        except (zipfile.BadZipFile, OSError) as error:
+            raise ArchiveError(f"Can't read {path.name}: {error}") from error
     res = subprocess.run([_seven_zip(), "l", "-slt", "-ba", "-sccUTF-8", str(path)],
                          capture_output=True, text=True, errors="replace")
     if res.returncode not in (0, 1) and not res.stdout.strip():
@@ -177,6 +190,14 @@ def extract(archive: Path, dest: Path, password: str = "", progress: Progress = 
             if proc:
                 proc.kill()
                 proc.wait()
+    elif _plain_zip(archive):
+        try:
+            with zipfile.ZipFile(archive) as zf:
+                if password:
+                    zf.setpassword(password.encode())
+                zf.extractall(dest)  # paths were checked above
+        except (zipfile.BadZipFile, RuntimeError, OSError) as error:
+            raise ArchiveError(f"Extracting failed: {error}") from error
     else:
         cmd = [_seven_zip(), "x", "-y", "-bso0", "-bsp0", f"-o{dest}", f"-p{password}", str(archive)]
         res = subprocess.run(cmd, capture_output=True, text=True, errors="replace")

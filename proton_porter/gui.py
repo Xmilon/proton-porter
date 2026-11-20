@@ -147,7 +147,10 @@ class Window(Adw.ApplicationWindow):
 
         if self.settings.check_updates:
             GLib.timeout_add_seconds(3, lambda: self.check_update(False) or False)
-        if not self.protons:
+        if not self.users and not self.protons:
+            self.error("Steam isn't set up", "Install Steam, log in once, and install a Proton version "
+                       "(Library > search “Proton”). Then start Proton Porter again.")
+        elif not self.protons:
             self.error("No Proton found", "Install Proton from Steam first: Library > search “Proton” > Install.")
         elif not self.users:
             self.error("No Steam account found", "Open Steam and log in once, then start Proton Porter again.")
@@ -713,6 +716,8 @@ class Window(Adw.ApplicationWindow):
             icon = Path(e.icon) if e.icon else data_dir() / "icons" / f"{e.appid}.png"
             if icon.suffix.lower() in (".png", ".jpg", ".jpeg", ".ico", ".svg") and icon.is_file():
                 row.add_prefix(Gtk.Image(file=str(icon), pixel_size=32))
+            else:  # same indent for every row
+                row.add_prefix(Gtk.Image(icon_name="applications-games-symbolic", pixel_size=32))
             play = Gtk.Button(icon_name="media-playback-start-symbolic", valign=Gtk.Align.CENTER,
                               tooltip_text="Play", sensitive=e.exe.is_file())
             play.add_css_class("flat")

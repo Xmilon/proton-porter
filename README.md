@@ -84,6 +84,10 @@ cd proton-porter-1.1.1
 (Fedora) and `zypper` (openSUSE). The window needs **libadwaita 1.4 or newer** (Ubuntu 24.04,
 Fedora 39, Debian 13 or later). The command line also works without it. Python 3.10 or newer is needed.
 
+Checked on Ubuntu 24.04, Debian 13, Fedora 41 and openSUSE Tumbleweed: the installer, the tests,
+the command line and the window. Those checks ran in containers without Steam. Day-to-day use is on Arch
+(Omarchy) with real games.
+
 It shows up as **Proton Porter** in the app launcher. `./install.sh --remove` uninstalls it.
 There's also a `PKGBUILD` (`makepkg -si`) and a single-file `proton-porter.pyz`.
 

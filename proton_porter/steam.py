@@ -89,7 +89,10 @@ def users() -> list[SteamUser]:
 # ------------------------------------------------------------------ libraries
 
 def libraries() -> list[Path]:
-    root = steam_root()
+    try:
+        root = steam_root()
+    except FileNotFoundError:  # no Steam: no libraries
+        return []
     out = [root]
     try:
         data = _vload(root / "config/libraryfolders.vdf")
@@ -128,8 +131,11 @@ def _valve_internal(dirname: str) -> str | None:
 
 def protons() -> list[Proton]:
     out: list[Proton] = []
-    root = steam_root()
-    for base in (root / "compatibilitytools.d", Path("~/.steam/root/compatibilitytools.d").expanduser(),
+    try:
+        own = [steam_root() / "compatibilitytools.d"]
+    except FileNotFoundError:  # no Steam yet: only system-wide tools
+        own = []
+    for base in (*own, Path("~/.steam/root/compatibilitytools.d").expanduser(),
                  Path("/usr/share/steam/compatibilitytools.d"), Path("/usr/local/share/steam/compatibilitytools.d")):
         if not base.is_dir():
             continue

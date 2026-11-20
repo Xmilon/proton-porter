@@ -31,6 +31,14 @@ def _print_analysis(a) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except FileNotFoundError as error:  # e.g. Steam isn't installed
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
+
+
+def _main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and not argv[0].startswith("-") and Path(argv[0]).exists():
         return _gui(["proton-porter", str(Path(argv[0]).resolve())])  # opens the window with it

@@ -199,11 +199,30 @@ def launch_options(prefix: str, args: str) -> str:
     return args  # no prefix: Steam appends plain options to the command
 
 
-def extract_icon(exe: Path, appid: int) -> str:
-    try:
-        ico = PEFile(exe).icon_ico()
-    except (PEError, OSError):
-        return ""
+def game_icon_file(exe: Path, root: Path) -> Path | None:
+    """An .ico the game ships for itself (repacks often add icon.ico). Used for emulator bundles,
+    where the .exe's own icon is the emulator's, not the game's."""
+    for folder in dict.fromkeys((root, exe.parent)):
+        for name in ("icon.ico", "game.ico", f"{root.name}.ico", f"{exe.stem}.ico"):
+            p = folder / name
+            if p.is_file():
+                return p
+    return None
+
+
+def extract_icon(exe: Path, appid: int, ico_file: Path | None = None) -> str:
+    """PNG (else .ico) of the game's icon, saved under the data folder. ico_file wins over the .exe's."""
+    ico = b""
+    if ico_file is not None:
+        try:
+            ico = ico_file.read_bytes()
+        except OSError:
+            ico = b""
+    if not ico:
+        try:
+            ico = PEFile(exe).icon_ico()
+        except (PEError, OSError):
+            return ""
     if not ico:
         return ""
     folder = data_dir() / "icons"
@@ -258,7 +277,7 @@ def _add_one(job: Job, progress: Progress) -> Result:
     shortcut = steam.Shortcut(c.name.strip(), target, target.parent, options, allow_overlay=c.overlay)
     appid = steam.shortcut_appid(shortcut.exe_field, shortcut.name)
     progress(f"{c.name}: icon", None)
-    shortcut.icon = extract_icon(exe, appid)
+    shortcut.icon = extract_icon(exe, appid, game_icon_file(exe, root) if a.emulator else None)
 
     progress(f"{c.name}: adding to Steam", None)
     appid, updated = steam.write_shortcut(c.user, shortcut)

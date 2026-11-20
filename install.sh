@@ -29,16 +29,16 @@ sudo=sudo
 
 # Package names per package manager: what each needed piece is called there.
 if command -v pacman >/dev/null; then
-  pm=pacman; install=($sudo pacman -S --needed)
+  pm=pacman; install=($sudo pacman -S --needed --noconfirm)
   pkg_vdf=python-vdf; pkg_gtk=(python-gobject gtk4 libadwaita); pkg_7z=7zip; pkg_zstd=zstd
 elif command -v apt-get >/dev/null; then
-  pm=apt; install=($sudo apt-get install)
+  pm=apt; install=($sudo apt-get install -y)
   pkg_vdf=python3-vdf; pkg_gtk=(python3-gi gir1.2-gtk-4.0 gir1.2-adw-1); pkg_7z=7zip; pkg_zstd=zstd
 elif command -v dnf >/dev/null; then
-  pm=dnf; install=($sudo dnf install)
+  pm=dnf; install=($sudo dnf install -y)
   pkg_vdf=python3-vdf; pkg_gtk=(python3-gobject gtk4 libadwaita); pkg_7z=7zip; pkg_zstd=zstd
 elif command -v zypper >/dev/null; then
-  pm=zypper; install=($sudo zypper install)
+  pm=zypper; install=($sudo zypper --non-interactive install)
   pkg_vdf=python3-vdf; pkg_gtk=(python3-gobject python3-gobject-Gdk typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1)
   pkg_7z=7zip; pkg_zstd=zstd
 else
@@ -49,7 +49,7 @@ missing=()
 python3 -c 'import vdf' 2>/dev/null || missing+=("$pkg_vdf")
 python3 -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1")' 2>/dev/null \
   || missing+=("${pkg_gtk[@]}")
-command -v 7z >/dev/null || command -v 7zz >/dev/null || missing+=("$pkg_7z")
+command -v 7z >/dev/null || command -v 7zz >/dev/null || command -v 7za >/dev/null || missing+=("$pkg_7z")
 command -v zstd >/dev/null || missing+=("$pkg_zstd")
 
 if [ ${#missing[@]} -gt 0 ]; then
@@ -64,7 +64,18 @@ if [ ${#missing[@]} -gt 0 ]; then
     case "$answer" in [nN]*) echo "Not installing. Run this again when they're installed."; exit 1 ;; esac
   fi
   # A package that doesn't exist on this release fails the install; the checks below catch what's missing.
-  "${install[@]}" "${missing[@]}" || echo "Some packages couldn't be installed; checking what's still missing."
+  # (we asked already, so the package manager doesn't ask again)
+  if ! "${install[@]}" "${missing[@]}"; then
+    [ "$pm" = apt ] && $sudo apt-get update  # stale package lists are the usual reason on Debian/Ubuntu
+    # One unknown name fails the whole transaction, so go one by one, with other names to try.
+    for p in "${missing[@]}"; do
+      case $p in 7zip) alts=(7zip p7zip-full "p7zip p7zip-plugins" p7zip) ;; *) alts=("$p") ;; esac
+      for alt in "${alts[@]}"; do
+        "${install[@]}" "$alt" >/dev/null 2>&1 && break
+      done
+    done
+    echo "Installed what this system has; checking what's still missing."
+  fi
 fi
 
 rm -rf "$app"
@@ -80,7 +91,7 @@ fi
 if ! python3 -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1")' 2>/dev/null; then
   echo "GTK 4 / libadwaita for Python are still missing. The command line works; the window won't." >&2
 fi
-command -v 7z >/dev/null || command -v 7zz >/dev/null \
+command -v 7z >/dev/null || command -v 7zz >/dev/null || command -v 7za >/dev/null \
   || echo "Note: no 7-Zip, so .rar/.7z/.zip archives can't be installed."
 
 cat > "$bin" <<SH

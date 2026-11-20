@@ -195,6 +195,23 @@ class Archives(core.Sandbox):
         self.assertEqual((self.tmp / "out/Game/data.pak").stat().st_size, 5000)
         self.assertTrue(os.access(self.tmp / "out/Game/bin/game.exe", os.X_OK))
 
+    def test_zip_without_7zip(self):
+        from proton_porter import archive
+        src = self.make_tree()
+        z = self.tmp / "Game.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            for p in src.rglob("*"):
+                if p.is_file():
+                    zf.write(p, p.relative_to(src.parent))
+        old = archive.shutil.which
+        archive.shutil.which = lambda n: None if n.startswith("7z") else old(n)
+        try:
+            self.assertTrue(all(e.crc is not None for e in archive.list_entries(z)))
+            folder = archive.install_game_archive(z, self.tmp / "Games")
+        finally:
+            archive.shutil.which = old
+        self.assertEqual((folder / "data.pak").stat().st_size, 5000)
+
     def test_unsafe_path_refused(self):
         from proton_porter import archive
         t = self.tmp / "evil.tar"
@@ -422,7 +439,7 @@ class Repacks(core.Sandbox):
         proton = self.tmp / "P"
         proton.mkdir()
         # fake proton: "install" by creating an exe inside the /DIR= folder (given as Z:\...)
-        (proton / "proton").write_text('#!/bin/sh\nd=$(echo "$3" | sed "s#^/DIR=Z:##; s#\\\\\\\\#/#g")\n'
+        (proton / "proton").write_text('#!/bin/sh\nd=$(printf "%s" "$3" | sed "s#^/DIR=Z:##; s#\\\\\\\\#/#g")\n'
                                        'mkdir -p "$d" && cp "$2" "$d/game.exe"\n')
         (proton / "proton").chmod(0o755)
         out = repack.install(repack.detect(d), self.tmp / "Games", steam.Proton("P", "P", proton))
@@ -590,6 +607,10 @@ class Helpers(core.Sandbox):
         steam.set_compat_tool(appid, "Proton-GE")
         e = steam.library(user)[0]
         calls = []
+        from proton_porter import runners
+        real = runners.all_runners
+        runners.all_runners = lambda: [steam.Proton("Proton-GE", "GE", self.tmp)]
+        self.addCleanup(setattr, runners, "all_runners", real)
         old = doctor._protontricks
         doctor._protontricks = lambda a, v: calls.append(v) or True
         try:
@@ -626,3 +647,11 @@ class Emulators(core.Sandbox):
         self.assertEqual([r.name for r in a.emulator.roms], ["title.nup"])
         self.assertTrue(any("second Steam entry" in n for n in a.notes))
         self.assertIsNone(analyze(self.exe, []).emulator)
+
+    def test_bundle_icon_is_the_games(self):
+        from proton_porter.apply import game_icon_file
+        d = self.tmp / "Some Game"
+        d.mkdir()
+        (d / "icon.ico").write_bytes(b"\0\0\1\0")
+        self.assertEqual(game_icon_file(d / "lichii.exe", d), d / "icon.ico")
+        self.assertIsNone(game_icon_file(self.exe, self.exe.parent))

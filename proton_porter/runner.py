@@ -268,8 +268,8 @@ def run_test(spec: RunSpec, workspace: int | None, seconds: float = 60, progress
 def spec_for(entry: steam.LibraryEntry, tools: list[steam.Proton]) -> RunSpec:
     from . import runners
     tool = next((t for t in tools if t.internal == entry.tool), None) or runners.pseudo(entry.tool)
-    if tool is None:
-        tool = steam.default_proton(tools)
+    if tool is None:  # a real Proton; never "native" for a Windows game
+        tool = steam.default_proton([t for t in tools if not runners.is_pseudo(t)])
     if tool is None:
         raise RuntimeError("No Proton found")
     return RunSpec(entry.appid, entry.exe, entry.start_dir, tool, entry.launch_options)
